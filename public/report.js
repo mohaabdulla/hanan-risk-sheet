@@ -29,6 +29,8 @@ const reportTitle = (d) => `Portfolio risk report: ${d.marketLabel}`;
 function summaryItems(d) {
   const t = d.totals, p = d.performance || {};
   return [
+    ["Total capital", money(d.portfolioSettings?.initial_capital ?? (t.cost + t.cash))],
+    ["Return start date", d.performance?.starts || d.portfolioSettings?.start_date || "First purchase"],
     ["Total portfolio value", money(t.total)],
     ["Invested", money(t.invested)],
     ["Cash", money(t.cash)],
@@ -163,10 +165,10 @@ async function buildPptx(d, want, images) {
   cover.addText(`Generated ${stamp()}`, { x: 0.8, y: 3.7, w: 11.7, h: 0.5, fontSize: 18, color: "E6F0FC", fontFace: "Calibri" });
 
   if (want.summary) {
-    const slide = pptx.addSlide();
-    head(slide, "Summary");
+    let slide;
     summaryItems(d).forEach(([label, value], i) => {
-      const x = 0.5 + (i % 3) * 4.15, y = 1.3 + Math.floor(i / 3) * 1.95;
+      if (i % 9 === 0) { slide = pptx.addSlide(); head(slide, i ? "Summary (continued)" : "Summary"); }
+      const x = 0.5 + (i % 3) * 4.15, y = 1.3 + Math.floor((i % 9) / 3) * 1.95;
       slide.addShape(pptx.ShapeType.roundRect, { x, y, w: 3.95, h: 1.75, fill: { color: "F9F9F7" }, line: { color: "E1E0D9", width: 1 }, rectRadius: 0.08 });
       slide.addText(label, { x: x + 0.2, y: y + 0.2, w: 3.55, h: 0.4, fontSize: 13, color: "76746E", fontFace: "Calibri" });
       slide.addText(value, { x: x + 0.2, y: y + 0.7, w: 3.55, h: 0.8, fontSize: 20, bold: true, color: "0B0B0B", fontFace: "Calibri", fit: "shrink" });
@@ -201,7 +203,7 @@ async function makeReport() {
   const format = document.querySelector('input[name="fmt"]:checked').value;
   const want = Object.fromEntries([...document.querySelectorAll("#reportSections input")].map((i) => [i.value, i.checked]));
   if (!Object.values(want).some(Boolean)) { status.textContent = "Tick at least one thing to include."; return; }
-  if (!state.positions.length) { status.textContent = "Add a position first, then the report will have something to show."; return; }
+  if (!state.positions.length && !state.analytics?.performance) { status.textContent = "Add a position or set capital and a start date first."; return; }
   if (!state.analytics) { status.textContent = state.loading ? "Market data is still loading. Try again in a moment." : "Market data hasn't loaded. Use Refresh prices, then try again."; return; }
   btn.disabled = true;
   status.textContent = "Building your report…";

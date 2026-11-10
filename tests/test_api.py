@@ -76,6 +76,40 @@ def test_bahrain_uses_the_official_index_once_it_is_imported(client):
     assert bench["name"] == "Bahrain All Share Index" and bench["source"] == "import"
 
 
+def test_total_capital_tracks_cash_and_persists_start_date(client):
+    add(client, shares=10, price=100)
+    response = client.put("/api/portfolio-settings", json={"market": "us", "initial_capital": 5000, "start_date": "2023-01-01"})
+    assert response.status_code == 200 and response.json()["cash"] == 4000
+    p = client.get("/api/portfolio?market=us").json()
+    assert p["portfolio_settings"] == {"initial_capital": 5000, "start_date": "2023-01-01"}
+    assert client.put("/api/cash", json={"market": "us", "amount": 99}).status_code == 400
+    add(client, ticker="MSFT", shares=2, price=200)
+    assert client.get("/api/portfolio?market=us").json()["cash"] == 3600
+    assert client.get("/api/portfolio?market=bh").json()["portfolio_settings"]["initial_capital"] is None
+    backup = client.get("/api/backup").json()
+    assert backup["portfolio_settings"]["us"]["start_date"] == "2023-01-01"
+    client.put("/api/portfolio-settings", json={"market": "us", "initial_capital": None})
+    assert client.get("/api/portfolio?market=us").json()["cash"] == 3600
+
+
+def test_capital_validation_on_settings_purchase_edit_and_restore(client):
+    pid = add(client, shares=10, price=100).json()["id"]
+    assert client.put("/api/portfolio-settings", json={"market": "us", "initial_capital": 999}).status_code == 400
+    assert client.put("/api/portfolio-settings", json={"market": "us", "initial_capital": 1000, "start_date": "2099-01-01"}).status_code == 422
+    assert client.put("/api/portfolio-settings", json={"market": "us", "initial_capital": 1000}).status_code == 200
+    assert add(client, ticker="MSFT", shares=1, price=1).status_code == 400
+    assert client.put(f"/api/positions/{pid}", json={"ticker": "AAPL", "shares": 11, "price_bought": 100, "date_bought": "2024-01-01"}).status_code == 400
+    client.delete(f"/api/positions/{pid}")
+    add(client, ticker="MSFT", shares=1, price=1000)
+    assert client.post(f"/api/positions/{pid}/restore").status_code == 400
+
+
+def test_bahrain_capital_converts_usd_quoted_purchase_cost(client):
+    add(client, market="bh", ticker="GFH", shares=5000, price=.25)
+    response = client.put("/api/portfolio-settings", json={"market": "bh", "initial_capital": 1000, "start_date": "2023-01-01"})
+    assert response.status_code == 200 and response.json()["cash"] == 530  # USD 1250 = BHD 470
+
+
 def test_bahrain_market_estimate_averages_the_active_stocks():
     import numpy as np
     import pandas as pd

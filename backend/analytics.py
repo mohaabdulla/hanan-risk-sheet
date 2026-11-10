@@ -20,6 +20,7 @@ import pandas as pd
 import yfinance as yf
 
 from backend import db
+from backend.currencies import quote_currency, quote_to_base, BH_USD_SYMBOLS, USD_BHD
 
 RISK_FREE_RATE = 0.0488
 SECTOR_WEIGHTS_FUND = "SPY"   # S&P 500 sector mix, shown on the US sector page
@@ -164,6 +165,8 @@ def market_config(market: str) -> Dict[str, Any]:
     cfg = {k: v for k, v in MARKETS[market].items() if k != "suffix"}
     cfg["market"] = market
     cfg["benchmark"] = get_benchmark(market)
+    cfg["usd_quote_symbols"] = sorted(BH_USD_SYMBOLS) if market == "bh" else []
+    cfg["usd_to_bhd"] = USD_BHD
     if market == "us":
         cfg["benchmark_options"] = [{"symbol": s, "name": n} for s, n in US_BENCHMARKS.items()]
     else:
@@ -187,7 +190,7 @@ def _history(symbols: List[str], start: str) -> Dict[str, pd.DataFrame]:
     need = [t for t in symbols if not fresh(t) and now - _MISSING.get(t, 0) > MISSING_TTL]
     if need:
         try:
-            data = yf.download(need, start=start, auto_adjust=True, group_by="ticker",
+            data = yf.download(need, start=start, auto_adjust=False, group_by="ticker",
                                threads=True, progress=False)
         except Exception as exc:
             print(f"price download failed: {exc}")
@@ -281,8 +284,8 @@ def _bh_market_estimate(histories: Dict[str, pd.DataFrame]) -> tuple:
     """
     Stand-in for the Bahrain All Share Index, which has no free data feed: the average daily
     move of the actively traded Bahrain Bourse stocks, chained into an index starting at 1000.
-    It is equal-weighted (the official index is weighted by company size) and includes dividends,
-    so it follows the market's direction but will not match the official index level.
+    It is equal-weighted (the official index is weighted by company size) and uses
+    price returns, so it will not match the official index level or performance.
     """
     closes = {t: histories[t + ".BH"]["Close"] for t in BH_MARKET_BASKET if t + ".BH" in histories}
     if len(closes) < 3:
@@ -399,14 +402,15 @@ def _parse_day(value: Optional[str]) -> Optional[datetime]:
 
 
 def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
-         market_returns: Optional[pd.Series], decimals: int) -> Dict[str, Any]:
+         market_returns: Optional[pd.Series], decimals: int, market: str = "us") -> Dict[str, Any]:
     ticker = pos["ticker"]
     shares = float(pos["shares"])
     price_bought = float(pos["price_bought"])
     closes = history["Close"]
     current_price = round(float(closes.iloc[-1]), 4)
     returns = _log_returns(closes)
-    position_value = round(current_price * shares, decimals)
+    fx = quote_to_base(market, ticker)
+    position_value = round(current_price * shares * fx, decimals)
 
     atr = _atr_series(history)
     current_atr = round(float(atr.iloc[-1]), 4) if not np.isnan(atr.iloc[-1]) else None
@@ -437,6 +441,8 @@ def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
         expected_return = round(RISK_FREE_RATE + beta * (annual_market - RISK_FREE_RATE), 6)
 
     market_cap = meta.get("market_cap")
+    traded = history.loc[history["Volume"] > 0] if "Volume" in history else history
+    last_trade_date = traded.index[-1].strftime("%Y-%m-%d") if not traded.empty else None
     px = max(decimals, 2)
     return {
         "id": pos["id"],
@@ -447,7 +453,9 @@ def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
         "date_bought": date_bought,
         "date_inferred": date_inferred,
         "sector": meta.get("sector") or "Unknown",
-        "value_paid": round(price_bought * shares, decimals),
+        "value_paid": round(price_bought * shares * fx, decimals),
+        "quote_currency": quote_currency(market, ticker),
+        "quote_to_base": fx,
         "current_price": current_price,
         "position_value": position_value,
         "pct_change": round((current_price - price_bought) / price_bought, 4) if price_bought > 0 else None,
@@ -468,89 +476,100 @@ def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
         "cap_formatted": _cap_label(market_cap),
         "cap_tier": _cap_tier(market_cap),
         "price_date": history.index[-1].strftime("%Y-%m-%d"),
-        "stale": False,
+        "last_trade_date": last_trade_date,
+        "stale": (datetime.now(timezone(timedelta(hours=3))).date() - history.index[-1].date()).days > 4,
+        "data_source": "Yahoo Finance daily unadjusted close (split-adjusted, cash dividends excluded)",
+        "source_url": f"https://finance.yahoo.com/quote/{feed_symbol(market, ticker)}/history/",
         "error": None,
     }
 
 
-def _performance(items: List[tuple], bench: Optional[pd.Series], bench_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Return on the money invested, day by day, next to what the same money would have
-    returned in the benchmark (each purchase is matched by buying the index on the same day).
-    If index data starts after the first purchase, the two lines start together on the first
-    day the index is available.
+def _performance(items: List[tuple], bench: Optional[pd.Series], bench_name: str,
+                 initial_capital: Optional[float] = None, cash: float = 0.0,
+                 start_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Track the entire account, including cash reserved before each purchase.
+
+    Capital is funded at the start, cash earns zero, and purchases transfer cash
+    into shares. No deposits, sales, fees or cash dividends are inferred. A later
+    reporting start rebases existing holdings at their last known closing price.
+    Never backfill prices from future observations.
     """
     lots = []
     for pos, hist in items:
         dt = _parse_day(pos.get("date_bought"))
-        if dt and hist is not None and not hist.empty:
-            lots.append((dt, float(pos["shares"]), float(pos["price_bought"]), hist["Close"]))
-    if not lots:
+        if not dt or hist is None or hist.empty:
+            return None
+        fx = float(pos.get("quote_to_base", 1.0))
+        lots.append((dt, float(pos["shares"]), float(pos["price_bought"]) * fx,
+                     hist["Close"].dropna().sort_index() * fx))
+    requested = _parse_day(start_date)
+    start = requested or (min(l[0] for l in lots) if lots else None)
+    if start is None:
         return None
-    start = min(l[0] for l in lots)
-    days = set()
-    for _, _, _, closes in lots:
-        days.update(closes.index[closes.index >= start])
-    idx = pd.DatetimeIndex(sorted(days))
-    if len(idx) < 2:
+    today = datetime.now(timezone(timedelta(hours=3))).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+    if start > today:
         return None
+    principal = initial_capital if initial_capital is not None else cash + sum(shares * price for _, shares, price, _ in lots)
+    if principal <= 0:
+        return None
+    idx = pd.date_range(start, today, freq="D")
 
-    def align(series: pd.Series) -> pd.Series:
+    def align(series):
         return series.reindex(series.index.union(idx)).ffill().reindex(idx)
 
-    value = pd.Series(0.0, index=idx)
-    cost = pd.Series(0.0, index=idx)
-    lot_values = []
+    equity = pd.Series(float(principal), index=idx)
+    baseline = float(principal)
     for dt, shares, price, closes in lots:
+        prices = align(closes)
         held = idx >= dt
-        v = (align(closes).bfill() * shares).where(held, 0.0)
-        lot_values.append((dt, shares * price, held, v))
-        value += v
-        cost += pd.Series(np.where(held, shares * price, 0.0), index=idx)
-    have = cost > 0
-    portfolio = (value / cost - 1).where(have)
-
+        # A missing quote for a held stock makes that day's return unavailable.
+        equity += ((prices - price) * shares).where(held, 0.0)
+        if dt < start:
+            if pd.isna(prices.iloc[0]):
+                return None
+            baseline += float((prices.iloc[0] - price) * shares)
+    if baseline <= 0:
+        return None
+    portfolio = equity / baseline - 1
     benchmark = None
+    benchmark_warning = None
     compare_from = None
-    if bench is not None and len(bench) >= 2:
-        b = align(bench)
-        covered = b.notna()
-        if covered.any() and covered.sum() >= 2:
-            t0 = idx[covered.values][0]
-            compare_from = max(t0, start)
-            bvalue = pd.Series(0.0, index=idx)
-            for dt, money, held, v in lot_values:
-                active = held & (idx >= compare_from)
-                if not active.any():
-                    continue
-                first = idx[active][0]
-                # Bought before index data begins: carry the position's value on that day into the index.
-                stake = money if dt >= compare_from else float(v.loc[first])
-                base = float(b.loc[first])
-                if base > 0:
-                    bvalue += (b / base * stake).where(active, 0.0)
-            benchmark = (bvalue / cost - 1).where(have & (idx >= compare_from))
-
+    comparison_day = None
+    portfolio_comparison_return = None
+    benchmark_comparison_return = None
+    benchmark_last_day = None
+    if bench is not None and len(bench.dropna()) >= 2:
+        source = bench.dropna().sort_index()
+        b = align(source)
+        benchmark_last_day = source.index[-1].strftime("%Y-%m-%d")
+        if pd.notna(b.iloc[0]) and b.iloc[0] > 0:
+            benchmark = (b / float(b.iloc[0]) - 1).where(idx <= source.index[-1])
+            common = portfolio.notna() & benchmark.notna()
+            if common.any():
+                comparison_day = idx[common][-1].strftime("%Y-%m-%d")
+                portfolio_comparison_return = round(float(portfolio[common].iloc[-1]), 5)
+                benchmark_comparison_return = round(float(benchmark[common].iloc[-1]), 5)
+                compare_from = start.strftime("%Y-%m-%d")
+        else:
+            benchmark_warning = "Benchmark history does not cover the selected start date. Add earlier index data or choose a later start date."
+    else:
+        benchmark_warning = "Benchmark history is unavailable for this period."
     step = max(1, math.ceil(len(idx) / MAX_CHART_POINTS))
-    keep = list(range(0, len(idx), step))
-    if keep[-1] != len(idx) - 1:
-        keep.append(len(idx) - 1)
-    pick = lambda s: [_clean(round(float(x), 5)) if pd.notna(x) else None for x in s.iloc[keep]]
-    last = lambda s: next((round(float(x), 5) for x in reversed(s.tolist()) if pd.notna(x)), None)
-    port_at_start = None
-    if benchmark is not None and compare_from is not None and pd.notna(portfolio.loc[compare_from]):
-        port_at_start = float(portfolio.loc[compare_from])
+    keep = sorted(set([0, len(idx) - 1] + list(range(0, len(idx), step)) +
+                      ([idx.get_loc(pd.Timestamp(comparison_day))] if comparison_day else [])))
+    pick = lambda series: [_clean(round(float(x), 5)) if pd.notna(x) else None for x in series.iloc[keep]]
+    latest = portfolio.dropna()
     return {
-        "days": [d.strftime("%Y-%m-%d") for d in idx[keep]],
-        "portfolio": pick(portfolio),
-        "benchmark": pick(benchmark) if benchmark is not None else None,
-        "benchmark_name": bench_name,
-        "compare_from": compare_from.strftime("%Y-%m-%d") if compare_from is not None else None,
-        "starts": start.strftime("%Y-%m-%d"),
-        "portfolio_return": last(portfolio),
-        "benchmark_return": last(benchmark) if benchmark is not None else None,
-        "portfolio_return_since_compare": (round((1 + last(portfolio)) / (1 + port_at_start) - 1, 5)
-                                           if port_at_start is not None and last(portfolio) is not None else None),
+        "days": [day.strftime("%Y-%m-%d") for day in idx[keep]],
+        "portfolio": pick(portfolio), "benchmark": pick(benchmark) if benchmark is not None else None,
+        "benchmark_name": bench_name, "starts": start.strftime("%Y-%m-%d"),
+        "compare_from": compare_from, "comparison_day": comparison_day,
+        "portfolio_return": round(float(latest.iloc[-1]), 5) if len(latest) else None,
+        "benchmark_return": benchmark_comparison_return,
+        "portfolio_comparison_return": portfolio_comparison_return,
+        "benchmark_warning": benchmark_warning, "benchmark_last_day": benchmark_last_day,
+        "baseline_value": round(baseline, 6), "initial_capital": principal,
+        "basis": "whole_account", "cash_included": True,
     }
 
 
@@ -559,6 +578,7 @@ def compute(market: str) -> Dict[str, Any]:
     decimals = cfg["decimals"]
     positions = db.list_positions(market)
     cash = db.get_cash(market)
+    settings = db.get_portfolio_settings(market)
     bench_info = get_benchmark(market)
 
     symbols = {p["id"]: feed_symbol(market, p["ticker"]) for p in positions}
@@ -569,10 +589,12 @@ def compute(market: str) -> Dict[str, Any]:
     bench_close: Optional[pd.Series] = None
     feed_ok = True
 
-    if wanted:
+    if wanted or settings["start_date"]:
         # Go back far enough to cover the oldest purchase, and at least five years for beta / VaR.
         dates = [datetime.now() - timedelta(days=365 * MIN_HISTORY_YEARS)]
         dates += [d - timedelta(days=90) for d in (_parse_day(p.get("date_bought")) for p in positions) if d]
+        if settings["start_date"]:
+            dates.append(_parse_day(settings["start_date"]) - timedelta(days=90))
         start = min(dates).strftime("%Y-%m-01")
         extra = [bench_info["symbol"]] if bench_info["symbol"] else []
         if bench_info["source"] == "estimate":
@@ -591,7 +613,7 @@ def compute(market: str) -> Dict[str, Any]:
     if market == "bh":
         if bench_info["source"] == "import":
             bench_close = _imported_index(market)
-        elif wanted:
+        elif histories:
             bench_close, used = _bh_market_estimate(histories)
             bench_info["stocks"] = used
     market_returns = _log_returns(bench_close) if bench_close is not None else None
@@ -605,9 +627,11 @@ def compute(market: str) -> Dict[str, Any]:
         row = None
         if hist is not None and not hist.empty:
             try:
-                row = _row(pos, hist, meta.get(sym, {}), market_returns, decimals)
+                row = _row(pos, hist, meta.get(sym, {}), market_returns, decimals, market)
+                if sym in _HIST and time.time() - _HIST[sym][0] > PRICE_TTL:
+                    row["stale"] = True
                 db.set_metrics(pos["id"], row)
-                perf_items.append((pos, hist))
+                perf_items.append(({**pos, "quote_to_base": quote_to_base(market, pos["ticker"])}, hist))
             except Exception as exc:
                 print(f"calc failed for {pos['ticker']}: {exc}")
         if row is None:
@@ -617,12 +641,21 @@ def compute(market: str) -> Dict[str, Any]:
                 row = dict(last["data"])
                 row.update({"shares": float(pos["shares"]), "price_bought": float(pos["price_bought"]),
                             "stale": True, "error": None})
-                row["position_value"] = round((row.get("current_price") or 0) * row["shares"], decimals)
-                row["value_paid"] = round(row["price_bought"] * row["shares"], decimals)
+                fx = quote_to_base(market, pos["ticker"])
+                row["quote_currency"] = quote_currency(market, pos["ticker"])
+                row["quote_to_base"] = fx
+                old_value = row.get("position_value")
+                row["position_value"] = round((row.get("current_price") or 0) * row["shares"] * fx, decimals)
+                row["value_paid"] = round(row["price_bought"] * row["shares"] * fx, decimals)
+                row["var"] = round(row["var"] / old_value * row["position_value"], 2) if old_value and row.get("var") is not None else None
+                # Recompute purchase-dependent metrics from the edited inputs.
+                row["date_bought"] = pos.get("date_bought")
+                row["pct_change"] = round(row["current_price"] / row["price_bought"] - 1, 4) if row.get("current_price") and row["price_bought"] else None
             else:
                 row = {"id": pos["id"], "ticker": pos["ticker"], "shares": float(pos["shares"]),
                        "price_bought": float(pos["price_bought"]), "date_bought": pos.get("date_bought"),
-                       "value_paid": round(float(pos["price_bought"]) * float(pos["shares"]), decimals),
+                       "value_paid": round(float(pos["price_bought"]) * float(pos["shares"]) * quote_to_base(market, pos["ticker"]), decimals),
+                       "quote_currency": quote_currency(market, pos["ticker"]), "quote_to_base": quote_to_base(market, pos["ticker"]),
                        "sector": None, "position_value": None, "stale": False,
                        "error": "No market data found for this ticker"}
         rows.append(row)
@@ -656,7 +689,8 @@ def compute(market: str) -> Dict[str, Any]:
 
     performance = None
     try:
-        performance = _performance(perf_items, bench_close, bench_info["name"])
+        if len(perf_items) == len(positions):
+            performance = _performance(perf_items, bench_close, bench_info["name"], settings["initial_capital"], cash, settings["start_date"])
     except Exception as exc:
         print(f"performance series failed: {exc}")
 
@@ -670,5 +704,7 @@ def compute(market: str) -> Dict[str, Any]:
         "benchmark": bench_info,
         "as_of": db.now(),
         "risk_free_rate": RISK_FREE_RATE,
+        "portfolio_settings": settings,
+        "performance_warning": "Performance needs a purchase date and price history for every holding; partial portfolios are not compared." if positions and performance is None else None,
         "feed_ok": feed_ok,
     }

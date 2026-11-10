@@ -7,7 +7,7 @@ try {
     $excel = New-Object -ComObject Excel.Application
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
-    foreach ($name in @('us', 'charts-only', 'positions-only', 'bh', 'missing')) {
+    foreach ($name in @('us', 'charts-only', 'positions-only', 'bh', 'missing', 'funded-bh')) {
         $file = (Resolve-Path -LiteralPath (Join-Path $WorkbookDirectory "$name.xlsx")).Path
         $book = $excel.Workbooks.Open($file, 0, $true)
         $excel.CalculateFullRebuild()
@@ -21,7 +21,7 @@ try {
                 }
             }
         }
-        $expected = @{ 'us' = 8; 'charts-only' = 8; 'positions-only' = 0; 'bh' = 5; 'missing' = 0 }[$name]
+        $expected = @{ 'us' = 8; 'charts-only' = 8; 'positions-only' = 0; 'bh' = 5; 'missing' = 0; 'funded-bh' = 5 }[$name]
         if ($count -ne $expected) { throw "$name has $count charts; expected $expected" }
         if ($name -eq 'us') {
             $summary = $book.Worksheets.Item('Summary')
@@ -44,6 +44,15 @@ try {
         }
         if ($name -eq 'missing' -and $book.Worksheets.Item('Summary').Range('B5').Value2 -ne 0) {
             throw 'Unpriced positions must not contribute to portfolio cost'
+        }
+        if ($name -eq 'funded-bh') {
+            $summary = $book.Worksheets.Item('Summary')
+            if ([math]::Abs($summary.Range('B2').Value2 - 1347.8) -gt 0.001) { throw 'USD/BHD account value is incorrect' }
+            $book.Worksheets.Item('Positions').Range('D2').Value2 = 4000
+            $book.Worksheets.Item('Positions').Range('G2').Value2 = 0.5
+            $excel.CalculateFullRebuild()
+            if ([math]::Abs($summary.Range('B2').Value2 - 1376) -gt 0.001) { throw 'Funded account did not recalculate after editing shares and price' }
+            if ([math]::Abs($book.Worksheets.Item('Inputs').Range('B2').Value2 - 624) -gt 0.001) { throw 'Cash did not follow the converted purchase cost' }
         }
         $book.Close($false)
         $book = $null

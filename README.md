@@ -42,6 +42,28 @@ snapshots; VaR scales with position value using the exported rate. Historical re
 not rebuilt from edited holdings. Existing-row edits recalculate in Excel; when adding rows, extend
 formulas and chart ranges through Chart Design > Select Data.
 
+## Capital and performance
+
+Overview → **Set capital and start date** accepts the entire amount allocated to a
+portfolio, including cash. With capital set, remaining cash follows capital minus
+the purchase costs of active holdings. Capital must cover those purchases. Leave
+capital blank to manage cash manually. Settings are saved separately for US and
+Bahrain and included in full backups.
+
+Performance includes cash at 0% from the selected date, even before the first
+trade. The benchmark invests the full starting account value on that date. A
+later reporting date rebases already-owned holdings. Prices are carried forward
+from known observations, never backfilled from future prices. An index without
+history covering the selected start is not compared; stale benchmark observations
+are compared only with portfolio returns from the same day. These calculations
+model the current purchase lots and exclude sales, deposits, withdrawals, fees and
+cash dividends. Changes to the holdings reconstruct this model's past series.
+
+Bahrain prices retain their quote currency; position values, costs and VaR are in
+BHD. USD-quoted stocks use the 0.376 BHD/USD peg. The default Bahrain stock basket
+is an estimate, **not the official All Share Index**. Import actual daily index
+closes for that comparison. See [the dated Bahrain data audit](docs/bahrain-data-audit.md).
+
 ## Layout
 
 - `backend/db.py` storage (Postgres / SQLite)

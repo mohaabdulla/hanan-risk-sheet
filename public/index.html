@@ -49,6 +49,13 @@
 
     <!-- OVERVIEW -->
     <section class="view active" id="view-overview">
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Portfolio setup</h2><p class="muted" id="portfolioSetupStatus">Set total capital and the date to measure returns from.</p></div>
+          <button class="btn" type="button" data-action="portfolio-setup">Set capital and start date</button>
+        </div>
+        <p class="muted" id="dataSourceNote"></p>
+      </div>
       <div class="kpis" id="kpis"></div>
       <div class="empty" id="emptyOverview" hidden>
         <h2>No positions yet</h2>
@@ -179,6 +186,21 @@
       <button class="btn" type="button" data-close>Cancel</button>
       <button class="btn primary" type="submit">Save cash</button>
     </div>
+  </form>
+</dialog>
+
+<dialog id="portfolioDialog" class="dialog">
+  <form id="portfolioForm" novalidate>
+    <h2>Capital and performance start</h2>
+    <label class="field"><span id="capitalLabel">Total capital</span>
+      <input class="input" name="initial_capital" type="number" min="0" step="any" />
+      <small class="muted">All money allocated to this portfolio, including cash. Cash is calculated as capital minus purchase costs. Enter purchase prices in each stock's quote currency.</small></label>
+    <label class="field"><span>Measure returns from</span>
+      <input class="input" name="start_date" type="date" />
+      <small class="muted">A date before your first trade includes time spent in cash. The benchmark invests the whole starting value from this date. A later date rebases existing holdings at that date's closing value.</small></label>
+    <p class="muted">Cash earns 0%. Returns exclude cash dividends, fees, deposits and withdrawals. Blank capital keeps manual cash; a blank date starts at your first purchase.</p>
+    <p class="form-error" id="portfolioError" role="alert"></p>
+    <div class="dialog-actions"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary" id="portfolioSave" type="submit">Save setup</button></div>
   </form>
 </dialog>
 

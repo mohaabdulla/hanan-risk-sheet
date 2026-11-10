@@ -9,7 +9,7 @@ const MARKET_UI = {
 
 const state = {
   market: "us", config: null,
-  positions: [], cash: 0, allocations: {}, analytics: null,
+  positions: [], cash: 0, portfolioSettings: { initial_capital: null, start_date: null }, allocations: {}, analytics: null,
   loading: true, sort: { key: null, dir: 1 }, filter: "", sectorChart: "bar",
   view: "overview", signature: "", editingId: null, customBenchmark: false,
 };
@@ -36,6 +36,7 @@ const signClass = (v) => (isNum(v) ? (v > 0 ? "up" : v < 0 ? "down" : "") : "");
 /* Column definitions, shared by the positions table and the report builder. */
 const COLS = [
   { k: "ticker", h: "Ticker", type: "text" },
+  { k: "quote_currency", h: "Quote currency", type: "text" },
   { k: "sector", h: "Sector", type: "text" },
   { k: "date_bought", h: "Date bought", type: "text" },
   { k: "shares", h: "Shares", type: "shares" },
@@ -68,7 +69,8 @@ function fmtCell(col, row) {
   const v = row[col.k];
   if (v === null || v === undefined || v === "") return "—";
   switch (col.type) {
-    case "money": return money(v);
+    case "money": return ["price_bought", "current_price", "take_profit", "stop_loss", "current_tp", "current_sl"].includes(col.k)
+      ? money(v, ui().decimals, row.quote_currency === "USD" ? "us" : state.market) : money(v);
     case "pct": return pct(v);
     case "delta": return signedPct(v);
     case "num": return num(v, col.d ?? 2);
@@ -149,7 +151,7 @@ function derive() {
     hasCaps: state.market === "us" || priced.some((r) => r.cap_tier),
     hasMarketWeights: Object.keys(market).length > 0,
     performance: a ? a.performance : null, benchmark,
-    history: (a && a.value_history) || [], asOf: a && a.as_of,
+    history: (a && a.value_history) || [], asOf: a && a.as_of, portfolioSettings: state.portfolioSettings,
   };
 }
 
@@ -194,13 +196,12 @@ function chartDefs(d, mode, opts = {}) {
   const p = d.performance;
   const bName = d.benchmark.name;
   const estimate = d.benchmark.source === "estimate";
-  let perfNote = estimate
-    ? `Return on the money you invested, next to the same money spread across the Bahrain market on the same dates. The market line is an estimate: the average move of ${d.benchmark.stocks || "the"} actively traded Bahrain Bourse stocks, used because the official Bahrain All Share Index has no free data feed`
-    : `Return on the money you invested, next to the same money put into the ${bName} on the same dates`;
+  let perfNote = `Whole-account return, including cash at 0%, from ${p?.starts || "your selected start date"}. Compared with investing the whole starting value in ${bName}. Prices exclude cash dividends and fees`;
+  if (estimate) perfNote += ". This is an equal-weight stock-basket estimate, not the official Bahrain All Share Index";
   let perfEmpty = null;
-  if (!p) perfEmpty = has ? "Performance appears once each position has its purchase date and price history." : none;
-  else if (!p.benchmark) perfNote = `Return on the money you invested. Market data for the ${bName} isn't available right now`;
-  else if (p.compare_from && (new Date(p.compare_from) - new Date(p.starts)) / 864e5 > 7) perfNote += `. Market data starts ${p.compare_from}, so the market line begins there`;
+  if (!p) perfEmpty = "Set a start date and capital, and add purchase dates and price history for every holding.";
+  else if (!p.benchmark) perfNote += `. ${p.benchmark_warning || "Benchmark data is unavailable for the selected period"}`;
+  if (p?.comparison_day) perfNote += `. Comparison through ${p.comparison_day}`;
   const perfSets = p ? [{ label: "Your portfolio", data: p.portfolio.map((v) => (v == null ? null : v * 100)), borderColor: t.series[0], backgroundColor: t.series[0] }] : [];
   if (p && p.benchmark) perfSets.push({ label: bName, data: p.benchmark.map((v) => (v == null ? null : v * 100)), borderColor: t.series[1], backgroundColor: t.series[1] });
   defs.push({ id: "performance", title: "Your performance vs the market", note: perfNote, height: 340, wide: true, perf: true, empty: perfEmpty,
@@ -322,10 +323,11 @@ function perfTools() {
 function perfStats(d, t) {
   const p = d.performance;
   if (!p) return "";
-  const diff = isNum(p.portfolio_return) && isNum(p.benchmark_return) ? p.portfolio_return - p.benchmark_return : null;
+  const comparedReturn = p.portfolio_comparison_return ?? p.portfolio_return;
+  const diff = isNum(p.portfolio_comparison_return) && isNum(p.benchmark_return) ? p.portfolio_comparison_return - p.benchmark_return : null;
   const pts = (v) => (isNum(v) ? `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(2)} pts` : "—");
   return `<div class="perf-stats">
-    <div><strong class="${signClass(p.portfolio_return)}">${signedPct(p.portfolio_return)}</strong><span class="key" style="background:${t.series[0]}"></span>Your portfolio</div>
+    <div><strong class="${signClass(comparedReturn)}">${signedPct(comparedReturn)}</strong><span class="key" style="background:${t.series[0]}"></span>Your portfolio${p.comparison_day ? ` through ${esc(p.comparison_day)}` : ""}</div>
     ${p.benchmark ? `<div><strong class="${signClass(p.benchmark_return)}">${signedPct(p.benchmark_return)}</strong><span class="key" style="background:${t.series[1]}"></span>${esc(d.benchmark.name)}</div>
     <div><strong class="${signClass(diff)}">${pts(diff)}</strong>${diff == null ? "Difference" : diff >= 0 ? "Ahead of the market" : "Behind the market"}</div>` : ""}
   </div>`;
@@ -334,12 +336,12 @@ function perfStats(d, t) {
 function renderCharts(d) {
   charts.splice(0).forEach((c) => c.destroy());
   const host = $("#charts");
-  if (!state.positions.length) { host.innerHTML = ""; return; }
+  if (!state.positions.length && !d.performance) { host.innerHTML = ""; return; }
   if (state.view !== "overview") return; // a hidden canvas has no size; drawn when the tab is opened
   Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
   Chart.defaults.font.size = 12;
   const mode = currentMode();
-  const defs = chartDefs(d, mode, { sectorChart: state.sectorChart });
+  const defs = chartDefs(d, mode, { sectorChart: state.sectorChart }).filter((def) => state.positions.length || !def.empty);
   const waiting = state.loading && !d.asOf;
   host.innerHTML = defs.map((def) => `
     <div class="card chart-card${def.wide ? " wide" : ""}">
@@ -366,14 +368,15 @@ function renderKpis(d) {
   const t = d.totals, p = d.performance;
   const wait = state.loading && !d.asOf;
   const v = (text) => (wait ? '<span class="skeleton"></span>' : text);
-  const diff = p && isNum(p.portfolio_return) && isNum(p.benchmark_return) ? p.portfolio_return - p.benchmark_return : null;
+  const diff = p && isNum(p.portfolio_comparison_return) && isNum(p.benchmark_return) ? p.portfolio_comparison_return - p.benchmark_return : null;
   const diffText = isNum(diff) ? `${diff > 0 ? "+" : diff < 0 ? "−" : ""}${Math.abs(diff * 100).toFixed(2)} pts` : "—";
   const tiles = [
     ["Total portfolio value", v(money(t.total)), "Invested plus cash"],
     ["Invested", v(money(t.invested)), `${t.positions} position${t.positions === 1 ? "" : "s"}`],
-    ['Cash <button class="link" type="button" data-action="cash">Edit</button>', money(t.cash), "Uninvested balance"],
+    ['Cash <button class="link" type="button" data-action="cash">Edit</button>', money(t.cash), isNum(d.portfolioSettings?.initial_capital) ? "Total capital minus purchase costs" : "Uninvested balance"],
     ["Unrealised profit / loss", v(`<span class="${signClass(t.pnl)}">${isNum(t.pnl) ? (t.pnl > 0 ? "+" : "") + money(t.pnl) : "—"}</span>`), isNum(t.pnl_pct) ? `${signedPct(t.pnl_pct)} on ${money(t.cost)} paid` : "Against purchase cost"],
     ["Versus the market", v(`<span class="${signClass(diff)}">${diffText}</span>`), isNum(diff) ? `${d.benchmark.name}: ${signedPct(p.benchmark_return)}` : `Compared with ${d.benchmark.name}`],
+    ["Your whole-account return", v(signedPct(p?.portfolio_return)), p?.starts ? `From ${p.starts}, including cash` : "Set capital and start date"],
     ["Portfolio beta", v(num(t.beta, 2)), `Weighted, against ${d.benchmark.name}`],
     ["Expected return", v(pct(t.expected_return)), "CAPM, yearly"],
     ["Value at risk", v(money(t.var)), "One day, 95%, sum of positions"],
@@ -412,7 +415,7 @@ function renderPositions(d) {
     body = rows.map((r) => `<tr>${cols.map((c, i) => {
       if (i === 0) {
         const tag = r.error ? '<span class="tag">No market data</span>' : r.stale ? '<span class="tag">Last saved prices</span>' : "";
-        return `<td class="pin">${esc(r.ticker)}${tag}${r.name ? `<span class="sub">${esc(r.name)}</span>` : ""}</td>`;
+        return `<td class="pin">${esc(r.ticker)}${tag}${r.name ? `<span class="sub">${esc(r.name)}</span>` : ""}${r.price_date ? `<span class="sub">Close: ${esc(r.price_date)}${r.last_trade_date && r.last_trade_date !== r.price_date ? `; last trade: ${esc(r.last_trade_date)}` : ""}</span>` : ""}</td>`;
       }
       if (r.pending && !["shares", "price_bought", "date_bought"].includes(c.k)) return `<td>${state.loading ? '<span class="skeleton" style="width:40px"></span>' : "—"}</td>`;
       let text = esc(fmtCell(c, r));
@@ -461,6 +464,7 @@ function describe(a) {
   const m = x.market || (x.after && x.after.market) || "us";
   const where = `${ui(m).label}: `;
   switch (a.action) {
+    case "portfolio_settings_changed": return `${where}updated total capital and performance start date`;
     case "position_added": return `${where}added ${x.ticker}, ${shares(x.shares)} shares at ${money(x.price_bought, null, m)}`;
     case "position_edited": {
       const b = x.before || {}, f = x.after || {};
@@ -489,7 +493,12 @@ async function loadHistory() {
 /* ---------- render all ---------- */
 function render() {
   const d = derive();
-  $("#emptyOverview").hidden = state.positions.length > 0 || state.loading;
+  const setup = state.portfolioSettings || {};
+  $("#portfolioSetupStatus").textContent = `${isNum(setup.initial_capital) ? `Total capital ${money(setup.initial_capital)}; cash follows purchase costs.` : "Manual cash; total capital is cash plus purchase costs."} ${setup.start_date ? `Returns from ${setup.start_date}.` : "Returns from the first purchase date."}`;
+  $("#dataSourceNote").innerHTML = state.market === "bh"
+    ? 'Daily closing quotes: Yahoo Finance. USD-quoted holdings are converted to BHD at 0.376 BHD/USD; prices and ATR levels stay in their quote currency. Review existing USD-quoted purchase prices: the old form labelled all prices BHD. <a href="https://bahrainbourse.com/en/Quotes%20and%20Market/Stocks/Pages/Daily-Trading-Summary.aspx" target="_blank" rel="noopener">Check Bahrain Bourse quotes</a>.'
+    : "Daily closing quotes: Yahoo Finance. Performance includes cash and excludes cash dividends and fees.";
+  $("#emptyOverview").hidden = state.positions.length > 0 || state.loading || !!d.performance;
   renderKpis(d);
   renderCharts(d);
   renderPositions(d);
@@ -501,6 +510,11 @@ function render() {
   const stale = d.rows.some((r) => r.stale);
   const undated = d.rows.filter((r) => !state.positions.find((x) => x.id === r.id)?.date_bought).map((r) => r.ticker);
   const msgs = [];
+  if (state.market === "bh" && d.benchmark.source === "estimate") msgs.push("Bahrain benchmark is an equal-weight stock-basket estimate, not the official All Share Index. Import official closing levels to compare with that index.");
+  if (state.market === "bh" && d.benchmark.source === "import") msgs.push("Bahrain benchmark uses user-imported index levels. The app does not independently verify imported values.");
+  if (a?.performance_warning) msgs.push(a.performance_warning);
+  if (d.performance?.benchmark_warning) msgs.push(d.performance.benchmark_warning);
+  if (state.cash < 0) msgs.push("Purchase costs exceed total capital. Increase total capital in Portfolio setup.");
   if (state.dbError) msgs.push(state.dbError);
   if (state.analyticsError) msgs.push(`Market data couldn't be loaded (${state.analyticsError}). Your saved positions are safe; use Refresh prices to try again.`);
   if (a && (!a.feed_ok || stale)) msgs.push("The market data feed isn't responding for some tickers, so the last saved figures are shown for them.");
@@ -510,7 +524,7 @@ function render() {
   banner.textContent = msgs.join(" ");
 
   const priceDay = d.priced.map((r) => r.price_date).filter(Boolean).sort().at(-1);
-  $("#asOf").textContent = state.loading ? "Loading market data…" : a && state.positions.length
+  $("#asOf").textContent = state.loading ? "Loading market data…" : a && (state.positions.length || d.performance)
     ? `${priceDay ? `Closing prices to ${priceDay} · ` : ""}updated ${new Date(a.as_of).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
     : state.dbError ? "Database unavailable" : "Add a position to get started";
 }
@@ -539,6 +553,7 @@ async function loadAnalytics() {
 function applyPortfolio(p) {
   state.positions = p.positions;
   state.cash = p.cash;
+  state.portfolioSettings = p.portfolio_settings || { initial_capital: null, start_date: null };
   state.allocations = p.allocations;
   state.config = p.config;
   state.signature = JSON.stringify(p);
@@ -616,8 +631,16 @@ function openPosition(id) {
   form.date_bought.max = new Date().toISOString().slice(0, 10);
   if (p) { form.ticker.value = p.ticker; form.shares.value = p.shares; form.price_bought.value = p.price_bought; form.date_bought.value = p.date_bought || ""; }
   $("#posDialog").showModal();
+  updateQuoteLabel();
   form.ticker.focus();
 }
+
+function updateQuoteLabel() {
+  const ticker = $("#posForm").ticker.value.trim().toUpperCase().replace(/\.BH$/, "");
+  const currency = state.market === "us" || (state.config?.usd_quote_symbols || []).includes(ticker) ? "USD" : "BHD";
+  $("#priceLabel").textContent = `Price bought (${currency})`;
+}
+$("#posForm").ticker.addEventListener("input", updateQuoteLabel);
 
 $("#posForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -653,6 +676,7 @@ async function restorePosition(id) {
 }
 
 function openCash() {
+  if (isNum(state.portfolioSettings.initial_capital)) { openPortfolioSetup(); return; }
   $("#cashError").textContent = "";
   $("#cashLabel").textContent = `Cash (${ui().prefix.trim()})`;
   $("#cashForm").amount.value = state.cash;
@@ -665,6 +689,28 @@ $("#cashForm").addEventListener("submit", async (e) => {
   if (!(amount >= 0)) { $("#cashError").textContent = "Enter an amount of zero or more."; return; }
   try { await api("PUT", "/api/cash", { market: state.market, amount }); $("#cashDialog").close(); toast("Cash saved"); await afterChange(); }
   catch (ex) { $("#cashError").textContent = ex.message; }
+});
+
+function openPortfolioSetup() {
+  const f = $("#portfolioForm");
+  $("#portfolioError").textContent = "";
+  $("#capitalLabel").textContent = `Total capital (${ui().prefix.trim()})`;
+  f.initial_capital.value = state.portfolioSettings.initial_capital ?? "";
+  f.start_date.value = state.portfolioSettings.start_date || "";
+  f.start_date.max = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Bahrain" });
+  $("#portfolioDialog").showModal();
+}
+$("#portfolioForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target, raw = f.initial_capital.value.trim();
+  const capital = raw ? Number(raw) : null;
+  if (capital !== null && (!Number.isFinite(capital) || capital <= 0)) { $("#portfolioError").textContent = "Enter capital greater than zero, or leave it blank for manual cash."; return; }
+  $("#portfolioSave").disabled = true;
+  try {
+    await api("PUT", "/api/portfolio-settings", { market: state.market, initial_capital: capital, start_date: f.start_date.value || null });
+    $("#portfolioDialog").close(); toast("Capital and start date saved"); await afterChange();
+  } catch (ex) { $("#portfolioError").textContent = ex.message; }
+  $("#portfolioSave").disabled = false;
 });
 
 async function setBenchmark(symbol) {
@@ -728,7 +774,7 @@ function openIndex() {
   $("#indexForm").day.max = new Date().toISOString().slice(0, 10);
   $("#indexStatus").textContent = cfg.index_points
     ? `${cfg.index_points} days saved, from ${cfg.index_from} to ${cfg.index_to}. Importing again adds new days and updates existing ones; nothing is removed.`
-    : "The market line currently shown is an estimate built from Bahrain Bourse stock prices, because the official index has no free data feed. If you import the official daily closing values here, the chart switches to them. This step is not required.";
+    : "The market line currently shown is an estimate built from Bahrain Bourse stock prices, because an official historical feed is not configured in this app. If you import the official daily closing values here, the chart switches to them. This step is not required.";
   $("#indexDialog").showModal();
 }
 $("#indexForm").addEventListener("submit", async (e) => {
@@ -769,7 +815,7 @@ function showView(name) {
 function setMarket(market) {
   if (!MARKET_UI[market]) market = "us";
   state.market = market;
-  Object.assign(state, { positions: [], cash: 0, allocations: {}, analytics: null, config: null, loading: true, signature: "", filter: "", sort: { key: null, dir: 1 }, analyticsError: null, customBenchmark: false });
+  Object.assign(state, { positions: [], cash: 0, portfolioSettings: { initial_capital: null, start_date: null }, allocations: {}, analytics: null, config: null, loading: true, signature: "", filter: "", sort: { key: null, dir: 1 }, analyticsError: null, customBenchmark: false });
   analyticsRun++;
   try { localStorage.setItem("risk-sheet-market", market); } catch { /* private window */ }
   if (location.hash !== `#/${market}`) history.replaceState(null, "", `#/${market}`);
@@ -791,6 +837,7 @@ document.addEventListener("click", (e) => {
   if (el.dataset.view) showView(el.dataset.view);
   else if (el.dataset.action === "add" || el.id === "addBtn") openPosition();
   else if (el.dataset.action === "cash") openCash();
+  else if (el.dataset.action === "portfolio-setup") openPortfolioSetup();
   else if (el.dataset.action === "index") openIndex();
   else if (el.dataset.action === "bench-apply") { const v = ($("#benchCustom").value || "").trim().toUpperCase(); if (v) setBenchmark(v); else $("#benchCustom").focus(); }
   else if (el.dataset.edit) openPosition(el.dataset.edit);
@@ -833,7 +880,7 @@ function setTheme(mode) {
   document.documentElement.dataset.theme = mode;
   $("#themeBtn").textContent = mode === "dark" ? "Light mode" : "Dark mode";
   try { localStorage.setItem("risk-sheet-theme", mode); } catch { /* private window */ }
-  if (state.positions.length) renderCharts(derive());
+  if (state.positions.length || state.analytics?.performance) renderCharts(derive());
 }
 
 (function start() {
@@ -843,5 +890,5 @@ function setTheme(mode) {
   setTheme(mode);
   setMarket(market || "us");
   setInterval(poll, 20000);
-  setInterval(() => { if (!busy() && state.positions.length) loadAnalytics(); }, 5 * 60 * 1000);
+  setInterval(() => { if (!busy() && (state.positions.length || state.portfolioSettings.start_date)) loadAnalytics(); }, 5 * 60 * 1000);
 })();

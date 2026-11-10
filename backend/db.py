@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from backend.currencies import quote_to_base
+
 
 def _pg_url() -> str:
     for key in ("DATABASE_URL", "POSTGRES_URL", "DATABASE_URL_UNPOOLED", "POSTGRES_URL_NON_POOLING"):
@@ -280,6 +282,9 @@ def set_setting(key: str, value: str) -> None:
 
 
 def get_cash(market: str) -> float:
+    capital = get_portfolio_settings(market)["initial_capital"]
+    if capital is not None:
+        return round(capital - position_cost(market), 3 if market == "bh" else 2)
     try:
         return float(get_setting(f"cash:{market}", "0") or 0)
     except ValueError:
@@ -291,6 +296,22 @@ def set_cash(market: str, amount: float) -> float:
     set_setting(f"cash:{market}", repr(float(amount)))
     log("cash_changed", {"market": market, "before": before, "after": amount})
     return amount
+
+
+def get_portfolio_settings(market: str) -> Dict[str, Any]:
+    raw = get_setting(f"portfolio:{market}")
+    return json.loads(raw) if raw else {"initial_capital": None, "start_date": None}
+
+
+def set_portfolio_settings(market: str, settings: Dict[str, Any]) -> None:
+    before = get_portfolio_settings(market)
+    set_setting(f"portfolio:{market}", json.dumps(settings))
+    log("portfolio_settings_changed", {"market": market, "before": before, "after": settings})
+
+
+def position_cost(market: str, positions=None) -> float:
+    rows = list_positions(market) if positions is None else positions
+    return sum(float(p["shares"]) * float(p["price_bought"]) * quote_to_base(market, p["ticker"]) for p in rows)
 
 
 # ---------- sector targets ----------

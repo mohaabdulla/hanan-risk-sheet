@@ -23,7 +23,8 @@ function createExcelReport(d, want) {
   const guide = sheet("Read me", ["Excel report", "How to use"], [30, 110]);
   [
     ["Market", d.marketLabel], ["Market data as of", d.asOf || "Export time"],
-    ["Edit inputs", "Blue text is editable input; dark text is calculated. Change holdings on Positions, cash on Inputs, and targets on Sectors."],
+    ["Edit inputs", "Blue text is editable input; dark text is calculated. Change holdings on Positions, capital or manual cash on Inputs, and targets on Sectors."],
+    ["Currencies", "Purchase prices, closing prices and ATR levels use each stock's quote currency. Position cost, value, VaR and totals use the portfolio currency. USD holdings in Bahrain use 0.376 BHD per USD."],
     ["Automatic calculations", "Excel recalculates formulas and linked charts when existing inputs change. Each chart sheet has its own source table beside the graph."],
     ["Chart ranges", "Chart ranges cover exported rows. If you add rows or a new category, extend the formulas and use Excel Chart Design > Select Data to include them."],
     ["Market data", "Prices, ATR, beta, expected returns, volatility and VaR rates are export-date inputs. This workbook does not download prices or rerun historical market models."],
@@ -40,8 +41,12 @@ function createExcelReport(d, want) {
   const inputs = sheet("Inputs", ["Input", "Value"]);
   inputs.addRow(["Cash", d.totals.cash]); inputs.getCell("B2").numFmt = currency;
   inputs.addRow(["As of date", new Date()]); inputs.getCell("B3").numFmt = "yyyy-mm-dd";
-  const keys = ["ticker", "sector", "date_bought", "shares", "price_bought", "value_paid", "current_price", "position_value", "pct_change", "entry_atr", "no_atrs", "take_profit", "stop_loss", "current_tp", "current_sl", "beta", "weight", "beta_weighted", "expected_return", "weighted_expected_return", "var", "iv", "holding_period", "market_cap", "cap_tier", "atr", "var_rate", "sector_count"];
-  const headers = ["Ticker", "Sector", "Date bought", "Shares", "Price bought", "Value paid", "Current price", "Current value", "Profit / loss", "Entry ATR", "No. ATRs", "Take profit (entry)", "Stop loss (entry)", "Take profit (now)", "Stop loss (now)", "Beta", "Weight", "Beta x weight", "Expected return", "Weighted exp. return", "VaR (95%)", "Volatility input", "Days held", "Market cap", "Cap tier", "Current ATR", "VaR rate input", "Sector stock count"];
+  const settings = d.portfolioSettings || {};
+  inputs.addRow(["Total capital", settings.initial_capital ?? null]); inputs.getCell("B4").numFmt = currency;
+  inputs.addRow(["Performance start (snapshot)", settings.start_date || d.performance?.starts || "First purchase"]);
+  inputs.addRow(["Performance baseline (snapshot)", d.performance?.baseline_value ?? null]); inputs.getCell("B6").numFmt = currency;
+  const keys = ["ticker", "sector", "date_bought", "shares", "price_bought", "value_paid", "current_price", "position_value", "pct_change", "entry_atr", "no_atrs", "take_profit", "stop_loss", "current_tp", "current_sl", "beta", "weight", "beta_weighted", "expected_return", "weighted_expected_return", "var", "iv", "holding_period", "market_cap", "cap_tier", "atr", "var_rate", "sector_count", "quote_currency", "quote_to_base"];
+  const headers = ["Ticker", "Sector", "Date bought", "Shares", "Price bought", "Value paid", "Current price", "Current value", "Profit / loss", "Entry ATR", "No. ATRs", "Take profit (entry)", "Stop loss (entry)", "Take profit (now)", "Stop loss (now)", "Beta", "Weight", "Beta x weight", "Expected return", "Weighted exp. return", "VaR (95%)", "Volatility input", "Days held", "Market cap", "Cap tier", "Current ATR", "VaR rate input", "Sector stock count", "Quote currency", "Quote to portfolio FX"];
   const pos = sheet("Positions", headers);
   const end = Math.max(2, d.rows.length + 1);
   const range = (col) => `Positions!$${col}$2:$${col}$${end}`;
@@ -51,10 +56,12 @@ function createExcelReport(d, want) {
     const values = keys.map((k) => r[k] ?? null);
     values[2] = r.date_bought ? new Date(r.date_bought + "T00:00:00Z") : null;
     values[26] = isNum(r.var) && r.position_value > 0 ? r.var / r.position_value : null;
+    values[28] = r.quote_currency || (d.market === "bh" ? "BHD" : "USD");
+    values[29] = r.quote_to_base ?? 1;
     pos.addRow(values);
     const formulas = {
-      F: [`ROUND(D${n}*E${n},${decimals})`, r.value_paid],
-      H: [`IF(ISNUMBER(G${n}),ROUND(D${n}*G${n},${decimals}),"")`, r.position_value],
+      F: [`ROUND(D${n}*E${n}*AD${n},${decimals})`, r.value_paid],
+      H: [`IF(ISNUMBER(G${n}),ROUND(D${n}*G${n}*AD${n},${decimals}),"")`, r.position_value],
       I: [`IF(AND(ISNUMBER(G${n}),E${n}>0),ROUND(G${n}/E${n}-1,4),"")`, r.pct_change],
       K: [`IF(AND(J${n}>0,ISNUMBER(G${n})),ROUND((G${n}-E${n})/J${n},4),"")`, r.no_atrs],
       L: [`IF(J${n}>0,ROUND(E${n}+2*J${n},${decimals}),"")`, r.take_profit],
@@ -72,6 +79,10 @@ function createExcelReport(d, want) {
     Object.entries(formulas).forEach(([col, [f, cached]]) => { pos.getCell(`${col}${n}`).value = formula(f, cached); });
   });
   [5, 6, 7, 8, 12, 13, 14, 15, 21].forEach((c) => { pos.getColumn(c).numFmt = currency; });
+  d.rows.forEach((r, i) => {
+    const quoteFormat = r.quote_currency === "USD" ? (d.market === "bh" ? '"$"#,##0.000' : '"$"#,##0.00') : currency;
+    [5, 7, 12, 13, 14, 15].forEach((c) => { pos.getCell(i + 2, c).numFmt = quoteFormat; });
+  });
   [9, 17, 19, 20, 22, 27].forEach((c) => { pos.getColumn(c).numFmt = "0.00%"; });
   [10, 11, 16, 18, 26].forEach((c) => { pos.getColumn(c).numFmt = "0.0000"; });
   pos.getColumn(3).numFmt = "yyyy-mm-dd";
@@ -79,7 +90,8 @@ function createExcelReport(d, want) {
   pos.getColumn(24).numFmt = '"$"#,##0';
   pos.getColumn(28).hidden = true;
   if (!d.hasCaps) [24, 25].forEach((c) => { pos.getColumn(c).hidden = true; });
-  pos.autoFilter = { from: "A1", to: `AB${end}` };
+  pos.autoFilter = { from: "A1", to: `AD${end}` };
+  if (isNum(settings.initial_capital)) inputs.getCell("B2").value = formula(`B4-SUM(Positions!F2:F${end})`, d.totals.cash);
 
   const t = d.totals;
   if (want.summary) {
@@ -97,6 +109,9 @@ function createExcelReport(d, want) {
       ["Positions", `COUNTA(${range("A")})`, d.rows.length, "0"],
     ];
     metrics.forEach(([label, f, value, fmt]) => { const row = ws.addRow([label, formula(f, value)]); row.getCell(2).numFmt = fmt; });
+    ws.addRow(["Total capital input", formula('IF(Inputs!B4="","",Inputs!B4)', settings.initial_capital)]).getCell(2).numFmt = currency;
+    ws.addRow(["Performance start", formula("Inputs!B5", settings.start_date || d.performance?.starts || "First purchase")]);
+    ws.addRow(["Comparison through", d.performance?.comparison_day || "Unavailable"]);
   }
 
   if (want.sectors || want.charts) {

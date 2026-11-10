@@ -39,6 +39,20 @@ const fixture = {
   assert.match(wb.getWorksheet("Summary").getCell("B2").formula, /Inputs!B2/);
   assert.equal(wb.getWorksheet("Chart - Performance").getCell("C5").result, "");
   assert.equal(wb.getWorksheet("Chart - Performance").getCell("B5").result, 0);
+  const fundedBh = {
+    ...fixture, market: "bh", marketLabel: "Bahrain", hasCaps: false, hasMarketWeights: false,
+    rows: [{ ticker: "GFH", sector: "Financials", shares: 5000, price_bought: .25, current_price: .435, quote_currency: "USD", quote_to_base: .376, value_paid: 470, position_value: 817.8, pct_change: .74, weight: 1, var: 16.36 }],
+    totals: { cash: 530, invested: 817.8, total: 1347.8, cost: 470, pnl: 347.8, pnl_pct: .74, var: 16.36 },
+    portfolioSettings: { initial_capital: 1000, start_date: "2024-01-01" },
+    sectors: [{ sector: "Financials", count: 1, total_value: 817.8, weight: 1, set_allocation: .8, allocation_goal: 654.24 }],
+    caps: [], performance: null, history: [],
+  };
+  const funded = context.createExcelReport(fundedBh, all).wb;
+  assert.equal(funded.getWorksheet("Positions").getCell("AD2").value, .376);
+  assert.match(funded.getWorksheet("Positions").getCell("H2").formula, /\*AD2/);
+  assert.equal(funded.getWorksheet("Positions").getCell("G2").numFmt, '"$"#,##0.000');
+  assert.match(funded.getWorksheet("Inputs").getCell("B2").formula, /B4-SUM/);
+  assert.equal(funded.getWorksheet("Inputs").getCell("B2").result, 530);
   fs.mkdirSync(process.argv[4], { recursive: true });
   for (const [name, data, options, count] of [
     ["us", fixture, all, 8],
@@ -46,6 +60,7 @@ const fixture = {
     ["positions-only", fixture, { positions: true }, 0],
     ["bh", { ...fixture, market: "bh", marketLabel: "Bahrain", hasCaps: false, hasMarketWeights: false, performance: null, history: [] }, all, 5],
     ["missing", { ...fixture, rows: [fixture.rows[2]], sectors: [], caps: [], performance: null, history: [], hasCaps: false }, all, 0],
+    ["funded-bh", fundedBh, all, 5],
   ]) {
     const buffer = await context.excelReportBuffer(data, options);
     const zip = await JSZip.loadAsync(buffer);
@@ -63,5 +78,5 @@ const fixture = {
     if (name === "bh") assert.equal(reloaded.getWorksheet("Positions").getCell("H2").numFmt, '"BD "#,##0.000');
     fs.writeFileSync(path.join(process.argv[4], `${name}.xlsx`), buffer);
   }
-  console.log("Excel export: all 5 workbook scenarios passed.");
+  console.log("Excel export: all 6 workbook scenarios passed.");
 })().catch((e) => { console.error(e); process.exitCode = 1; });
