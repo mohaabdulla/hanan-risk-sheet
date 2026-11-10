@@ -1,0 +1,5 @@
+.venv
+data
+*.zip
+node_modules
+__pycache__

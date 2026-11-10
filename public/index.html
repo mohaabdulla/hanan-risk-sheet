@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Risk Sheet</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M7 21l6-7 5 4 7-9' stroke='%23fff' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 21l6-7 5 4 7-9" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span>Risk Sheet</span>
+    </div>
+    <nav class="nav" aria-label="Sections">
+      <button class="nav-item active" data-view="overview">Overview</button>
+      <button class="nav-item" data-view="positions">Positions</button>
+      <button class="nav-item" data-view="sectors">Sectors</button>
+      <button class="nav-item" data-view="reports">Reports</button>
+      <button class="nav-item" data-view="history">History</button>
+    </nav>
+    <div class="side-foot">
+      <div class="save-state" id="saveState"><span class="dot"></span><span id="saveText">Connecting…</span></div>
+      <button class="btn ghost small" id="themeBtn" type="button">Dark mode</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="top">
+      <div>
+        <h1 id="viewTitle">Overview</h1>
+        <p class="muted" id="asOf">Loading portfolio…</p>
+      </div>
+      <div class="top-actions">
+        <button class="btn" id="refreshBtn" type="button">Refresh prices</button>
+        <button class="btn" id="reportBtn" type="button">Download report</button>
+        <button class="btn primary" id="addBtn" type="button">Add position</button>
+      </div>
+    </header>
+
+    <div class="banner" id="banner" hidden></div>
+
+    <!-- OVERVIEW -->
+    <section class="view active" id="view-overview">
+      <div class="kpis" id="kpis"></div>
+      <div class="empty" id="emptyOverview" hidden>
+        <h2>No positions yet</h2>
+        <p>Add your first holding and the risk figures and charts will appear here.</p>
+        <button class="btn primary" type="button" data-action="add">Add position</button>
+      </div>
+      <div class="charts" id="charts"></div>
+    </section>
+
+    <!-- POSITIONS -->
+    <section class="view" id="view-positions">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Positions</h2>
+            <p class="muted">Ticker, shares, price and date are yours to edit. Everything else is calculated from market data.</p>
+          </div>
+          <input class="input search" id="posSearch" type="search" placeholder="Filter by ticker or sector" aria-label="Filter positions" />
+        </div>
+        <div class="table-scroll"><table class="grid" id="posTable"></table></div>
+      </div>
+    </section>
+
+    <!-- SECTORS -->
+    <section class="view" id="view-sectors">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Sector allocation</h2>
+            <p class="muted">Set a target for each sector. Targets are saved as you type and compared with your holdings and the S&amp;P 500.</p>
+          </div>
+          <div class="muted" id="targetSum"></div>
+        </div>
+        <div class="table-scroll"><table class="grid" id="sectorTable"></table></div>
+      </div>
+      <div class="two-col">
+        <div class="card">
+          <div class="card-head"><h2>Market cap mix</h2></div>
+          <div class="table-scroll"><table class="grid" id="capTable"></table></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Portfolio summary</h2></div>
+          <div class="table-scroll"><table class="grid" id="summaryTable"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- REPORTS -->
+    <section class="view" id="view-reports">
+      <div class="card report-card">
+        <div class="card-head">
+          <div>
+            <h2>Download a report</h2>
+            <p class="muted">Every chart and table, built from the figures on screen right now.</p>
+          </div>
+        </div>
+        <h3>File type</h3>
+        <div class="formats" role="radiogroup" aria-label="File type">
+          <label class="format"><input type="radio" name="fmt" value="pdf" checked /><span class="format-body"><strong>PDF</strong><span>Print-ready document</span></span></label>
+          <label class="format"><input type="radio" name="fmt" value="pptx" /><span class="format-body"><strong>PowerPoint</strong><span>One chart per slide</span></span></label>
+          <label class="format"><input type="radio" name="fmt" value="xlsx" /><span class="format-body"><strong>Excel</strong><span>Data sheets plus charts</span></span></label>
+        </div>
+        <h3>Include</h3>
+        <div class="checks" id="reportSections">
+          <label><input type="checkbox" value="summary" checked /> Summary figures</label>
+          <label><input type="checkbox" value="charts" checked /> All charts</label>
+          <label><input type="checkbox" value="positions" checked /> Positions table</label>
+          <label><input type="checkbox" value="sectors" checked /> Sector allocation</label>
+          <label><input type="checkbox" value="caps" checked /> Market cap mix</label>
+        </div>
+        <div class="report-go">
+          <button class="btn primary" id="makeReport" type="button">Download report</button>
+          <span class="muted" id="reportStatus"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- HISTORY -->
+    <section class="view" id="view-history">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Removed positions</h2>
+            <p class="muted">Removing a position only hides it. It stays in the database and can be put back at any time.</p>
+          </div>
+          <a class="btn" href="/api/backup" download>Download full backup</a>
+        </div>
+        <div class="table-scroll"><table class="grid" id="binTable"></table></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div><h2>Change log</h2><p class="muted">Every edit, newest first.</p></div></div>
+        <ul class="log" id="activityLog"></ul>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="posDialog" class="dialog">
+  <form method="dialog" id="posForm" novalidate>
+    <h2 id="posDialogTitle">Add position</h2>
+    <label class="field"><span>Ticker</span>
+      <input class="input" name="ticker" required maxlength="12" autocomplete="off" placeholder="AAPL" /></label>
+    <div class="field-row">
+      <label class="field"><span>Shares</span>
+        <input class="input" name="shares" type="number" min="0" step="any" required placeholder="100" /></label>
+      <label class="field"><span>Price bought ($)</span>
+        <input class="input" name="price_bought" type="number" min="0" step="any" required placeholder="150.00" /></label>
+    </div>
+    <label class="field"><span>Date bought <em>optional</em></span>
+      <input class="input" name="date_bought" type="date" />
+      <small class="muted">Leave empty and the most recent day the stock traded at your price is used.</small></label>
+    <p class="form-error" id="posError" role="alert"></p>
+    <div class="dialog-actions">
+      <button class="btn" type="button" data-close>Cancel</button>
+      <button class="btn primary" type="submit" id="posSave">Save position</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="cashDialog" class="dialog">
+  <form method="dialog" id="cashForm" novalidate>
+    <h2>Cash balance</h2>
+    <label class="field"><span>Cash ($)</span>
+      <input class="input" name="amount" type="number" min="0" step="any" required /></label>
+    <p class="form-error" id="cashError" role="alert"></p>
+    <div class="dialog-actions">
+      <button class="btn" type="button" data-close>Cancel</button>
+      <button class="btn primary" type="submit">Save cash</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<div id="offscreen" aria-hidden="true"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="app.js"></script>
+<script src="report.js"></script>
+</body>
+</html>
