@@ -34,7 +34,13 @@ Tables are created automatically on first request.
 ## Reports
 
 Reports tab → choose PDF, PowerPoint or Excel and what to include. Files are built in the browser
-from the figures on screen and contain every chart plus the positions, sector and market-cap tables.
+from the figures on screen. PDF and PowerPoint contain chart images. Excel contains native editable
+charts, each beside a linked source table, and formulas for position values, P/L, weights, ATR levels,
+weighted risk, sector allocation, market-cap mix and totals. Supporting sheets are included as needed.
+Blue cells contain editable inputs. Market prices and historical model outputs are export-date
+snapshots; VaR scales with position value using the exported rate. Historical returns are observations,
+not rebuilt from edited holdings. Existing-row edits recalculate in Excel; when adding rows, extend
+formulas and chart ranges through Chart Design > Select Data.
 
 ## Layout
 
@@ -43,3 +49,17 @@ from the figures on screen and contain every chart plus the positions, sector an
 - `backend/main.py` API routes
 - `public/` interface (`app.js`), report builder (`report.js`)
 - `api/index.py` Vercel entry point
+
+## Excel export checks
+
+Download the ExcelJS 4.4.0 and JSZip 3.10.1 browser bundles used in `public/report.js`
+to a temporary directory, then run:
+
+```powershell
+node tests/test_excel_report.cjs <exceljs-bundle-path> <jszip-bundle-path> <output-directory>
+# Optional: open the generated fixtures in desktop Excel and verify recalculation.
+./tests/test_excel_report.ps1 -WorkbookDirectory <output-directory>
+```
+
+The fixtures cover US and Bahrain workbooks, charts-only and positions-only exports,
+missing market data, repeated purchase lots, zero returns and gaps in benchmark data.

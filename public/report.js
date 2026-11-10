@@ -4,7 +4,7 @@
 const LIBS = {
   pdf: ["https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js", "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"],
   pptx: ["https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"],
-  xlsx: ["https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"],
+  xlsx: ["https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js", "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js", "report-excel.js"],
 };
 const loaded = {};
 function loadScript(src) {
@@ -187,86 +187,8 @@ async function buildPptx(d, want, images) {
 }
 
 /* ---------- Excel ---------- */
-async function buildXlsx(d, want, images) {
-  const wb = new window.ExcelJS.Workbook();
-  wb.created = new Date();
-  const styleHead = (ws) => {
-    const row = ws.getRow(1);
-    row.font = { bold: true, color: { argb: "FFFFFFFF" } };
-    row.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + BLUE } };
-    row.alignment = { vertical: "middle", horizontal: "center" };
-    ws.views = [{ state: "frozen", xSplit: 1, ySplit: 1 }];
-  };
-  const fmts = { money: d.market === "bh" ? '"BD "#,##0.000' : "$#,##0.00", pct: "0.00%", delta: "0.00%", shares: "#,##0.####" };
-
-  if (want.summary) {
-    const ws = wb.addWorksheet("Summary");
-    ws.columns = [{ header: "Metric", key: "m", width: 34 }, { header: "Value", key: "v", width: 22 }];
-    const t = d.totals, p = d.performance || {};
-    [["Market", d.marketLabel, null], ["Total portfolio value", t.total, fmts.money], ["Invested", t.invested, fmts.money], ["Cash", t.cash, fmts.money],
-     ["Cost of positions", t.cost, fmts.money], ["Unrealised profit / loss", t.pnl, fmts.money], ["Unrealised profit / loss %", t.pnl_pct, fmts.pct],
-     ["Your return", p.portfolio_return ?? null, fmts.pct], [`${d.benchmark.name} return`, p.benchmark_return ?? null, fmts.pct],
-     ["Portfolio beta", t.beta, "0.00"], ["Expected return (CAPM)", t.expected_return, fmts.pct], ["Value at risk (1 day, 95%)", t.var, fmts.money],
-     ["Positions", t.positions, "0"], ["Generated", stamp(), null]].forEach(([m, v, f]) => { const r = ws.addRow({ m, v }); if (f) r.getCell(2).numFmt = f; });
-    styleHead(ws);
-  }
-  if (want.positions) {
-    const ws = wb.addWorksheet("Positions");
-    const cols = activeCols(d).map((c) => (c.k === "cap_formatted" ? { ...c, k: "market_cap", type: "money0" } : c));
-    ws.columns = cols.map((c) => ({ header: c.h, key: c.k, width: Math.max(13, c.h.length + 3) }));
-    d.rows.forEach((r) => ws.addRow(Object.fromEntries(cols.map((c) => [c.k, r[c.k] ?? null]))));
-    cols.forEach((c, i) => {
-      const f = c.type === "money0" ? "$#,##0" : c.type === "num" ? (c.d === 0 ? "0" : "0." + "0".repeat(c.d ?? 2)) : fmts[c.type];
-      if (f) ws.getColumn(i + 1).numFmt = f;
-    });
-    styleHead(ws);
-  }
-  if (want.sectors) {
-    const ws = wb.addWorksheet("Sectors");
-    const sc = [["Sector", "sector", 28], ["Stocks", "count", 10], ["Total value", "total_value", 16], ["Weight", "weight", 12], ["Target", "set_allocation", 12], ["Target value", "allocation_goal", 16]];
-    if (d.hasMarketWeights) sc.push(["S&P 500 weight", "market_weight", 16]);
-    ws.columns = sc.map(([header, key, width]) => ({ header, key, width }));
-    d.sectors.forEach((s) => ws.addRow(s));
-    [3, 6].forEach((i) => (ws.getColumn(i).numFmt = fmts.money));
-    [4, 5, 7].slice(0, d.hasMarketWeights ? 3 : 2).forEach((i) => (ws.getColumn(i).numFmt = fmts.pct));
-    styleHead(ws);
-  }
-  if (want.caps && d.hasCaps) {
-    const ws = wb.addWorksheet("Market cap");
-    ws.columns = [{ header: "Category", key: "category", width: 18 }, { header: "Count", key: "count", width: 10 }, { header: "Share of value", key: "pct", width: 16 }];
-    d.caps.forEach((c) => ws.addRow(c));
-    ws.getColumn(3).numFmt = fmts.pct;
-    styleHead(ws);
-  }
-  if (want.summary && d.performance) {
-    const ws = wb.addWorksheet("Performance");
-    const p = d.performance;
-    ws.columns = [{ header: "Day", key: "day", width: 14 }, { header: "Your portfolio return", key: "a", width: 24 }, { header: `${d.benchmark.name} return`, key: "b", width: 30 }];
-    p.days.forEach((day, i) => ws.addRow({ day, a: p.portfolio[i], b: p.benchmark ? p.benchmark[i] : null }));
-    [2, 3].forEach((i) => (ws.getColumn(i).numFmt = fmts.pct));
-    styleHead(ws);
-  }
-  if (want.summary && d.history.length) {
-    const ws = wb.addWorksheet("Value history");
-    ws.columns = [{ header: "Day", key: "day", width: 14 }, { header: "Invested", key: "invested", width: 16 }, { header: "Cash", key: "cash", width: 16 }, { header: "Total", key: "total", width: 16 }];
-    d.history.forEach((h) => ws.addRow(h));
-    [2, 3, 4].forEach((i) => (ws.getColumn(i).numFmt = fmts.money));
-    styleHead(ws);
-  }
-  if (want.charts && images.length) {
-    const ws = wb.addWorksheet("Charts");
-    ws.getColumn(1).width = 4;
-    let row = 1;
-    images.forEach((img) => {
-      ws.getCell(row, 2).value = img.title; ws.getCell(row, 2).font = { bold: true, size: 14 };
-      ws.getCell(row + 1, 2).value = img.note; ws.getCell(row + 1, 2).font = { color: { argb: "FF76746E" } };
-      const s = fit(img.w, img.h, 760, 620);
-      ws.addImage(wb.addImage({ base64: img.data, extension: "png" }), { tl: { col: 1, row: row + 1.5 }, ext: { width: s.w, height: s.h } });
-      row += Math.ceil(s.h / 20) + 5;
-    });
-  }
-  if (!wb.worksheets.length) wb.addWorksheet("Report");
-  const blob = new Blob([await wb.xlsx.writeBuffer()], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+async function buildXlsx(d, want) {
+  const blob = new Blob([await excelReportBuffer(d, want)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = fileName("xlsx");
   document.body.append(a); a.click(); a.remove();
@@ -286,7 +208,7 @@ async function makeReport() {
   try {
     for (const src of LIBS[format]) await loadScript(src);
     const d = derive();
-    const images = want.charts ? chartImages(d) : [];
+    const images = want.charts && format !== "xlsx" ? chartImages(d) : [];
     await { pdf: buildPdf, pptx: buildPptx, xlsx: buildXlsx }[format](d, want, images);
     status.textContent = `Done. ${fileName(format)} is in your downloads.`;
   } catch (e) {
