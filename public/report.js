@@ -23,24 +23,26 @@ const POSITION_SETS = [
   { title: "Positions: ATR levels", keys: ["ticker", "entry_atr", "no_atrs", "take_profit", "stop_loss", "current_tp", "current_sl"] },
   { title: "Positions: risk", keys: ["ticker", "beta", "weight", "beta_weighted", "expected_return", "weighted_expected_return", "var", "iv", "holding_period", "cap_formatted", "cap_tier"] },
 ];
-const colsFor = (keys) => keys.map((k) => COLS.find((c) => c.k === k));
+const colsFor = (keys, d) => keys.map((k) => COLS.find((c) => c.k === k)).filter((c) => !c.capOnly || d.hasCaps);
+const reportTitle = (d) => `Portfolio risk report: ${d.marketLabel}`;
 
 function summaryItems(d) {
-  const t = d.totals;
+  const t = d.totals, p = d.performance || {};
   return [
     ["Total portfolio value", money(t.total)],
     ["Invested", money(t.invested)],
     ["Cash", money(t.cash)],
-    ["Unrealised profit / loss", isNum(t.pnl) ? `${t.pnl < 0 ? "−" : "+"}${money(Math.abs(t.pnl))} (${signedPct(t.pnl_pct)})` : "—"],
+    ["Unrealised profit / loss", isNum(t.pnl) ? `${t.pnl > 0 ? "+" : ""}${money(t.pnl)} (${signedPct(t.pnl_pct)})` : "—"],
+    ["Your return", signedPct(p.portfolio_return)],
+    [`${d.benchmark.name} return`, signedPct(p.benchmark_return)],
     ["Portfolio beta", num(t.beta, 2)],
     ["Expected return (CAPM)", pct(t.expected_return)],
     ["Value at risk (1 day, 95%)", money(t.var)],
-    ["Positions", String(t.positions)],
   ];
 }
 const sectorTable = (d) => ({
-  head: ["Sector", "Stocks", "Total value", "Weight", "Target", "Target value", "S&P 500 weight"],
-  body: d.sectors.map((s) => [s.sector, String(s.count), money(s.total_value), pct(s.weight), pct(s.set_allocation), money(s.allocation_goal), s.market_weight ? pct(s.market_weight) : "—"]),
+  head: ["Sector", "Stocks", "Total value", "Weight", "Target", "Target value", ...(d.hasMarketWeights ? ["S&P 500 weight"] : [])],
+  body: d.sectors.map((s) => [s.sector, String(s.count), money(s.total_value), pct(s.weight), pct(s.set_allocation), money(s.allocation_goal), ...(d.hasMarketWeights ? [s.market_weight ? pct(s.market_weight) : "—"] : [])]),
 });
 const capTable = (d) => ({ head: ["Category", "Count", "Share of value"], body: d.caps.map((c) => [c.category, String(c.count), pct(c.pct)]) });
 
@@ -71,7 +73,8 @@ function chartImages(d) {
 }
 
 const stamp = () => new Date().toLocaleString(undefined, { dateStyle: "long", timeStyle: "short" });
-const fileName = (ext) => `risk-sheet-report-${new Date().toISOString().slice(0, 10)}.${ext}`;
+const fileName = (ext) => `risk-sheet-${state.market}-report-${new Date().toISOString().slice(0, 10)}.${ext}`;
+const plain = (s) => String(s).replace(/−/g, "-").replace(/—/g, "-").replace(/→/g, "->");
 function fit(w, h, maxW, maxH) { const k = Math.min(maxW / w, maxH / h); return { w: w * k, h: h * k }; }
 
 /* ---------- PDF ---------- */
@@ -94,7 +97,7 @@ async function buildPdf(d, want, images) {
     columnStyles: { 0: { halign: "left", fontStyle: "bold" } }, alternateRowStyles: { fillColor: [249, 249, 247] },
   });
 
-  page("Portfolio risk report");
+  page(reportTitle(d));
   doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(118, 116, 110);
   doc.text(`Generated ${stamp()}`, M, 29);
   if (want.summary) {
@@ -102,35 +105,35 @@ async function buildPdf(d, want, images) {
     items.forEach(([label, value], i) => {
       const x = M + (i % 4) * (bw + 5), y = 36 + Math.floor(i / 4) * (bh + 5);
       doc.setDrawColor(225, 224, 217); doc.setFillColor(252, 252, 251); doc.roundedRect(x, y, bw, bh, 2.5, 2.5, "FD");
-      doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(118, 116, 110); doc.text(label, x + 4, y + 8);
-      doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(11, 11, 11); doc.text(value.replace("−", "-"), x + 4, y + 18);
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(118, 116, 110); doc.text(plain(label), x + 4, y + 8);
+      doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(11, 11, 11); doc.text(plain(value), x + 4, y + 18);
     });
   }
   if (want.charts) {
-    const boxW = (W - 2 * M - 8) / 2, boxH = 150;
+    const boxW = (W - 2 * M - 8) / 2, boxH = 146;
     images.forEach((img, i) => {
       if (i % 2 === 0) page("Charts");
       const x = M + (i % 2) * (boxW + 8);
       doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(11, 11, 11); doc.text(img.title, x, 31);
-      doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(118, 116, 110); doc.text(img.note, x, 36);
+      doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(118, 116, 110); doc.text(doc.splitTextToSize(plain(img.note), boxW), x, 36);
       const s = fit(img.w, img.h, boxW, boxH);
-      doc.addImage(img.data, "PNG", x, 40, s.w, s.h, undefined, "FAST");
+      doc.addImage(img.data, "PNG", x, 46, s.w, s.h, undefined, "FAST");
     });
   }
   if (want.positions) {
     POSITION_SETS.forEach((set) => {
-      const cols = colsFor(set.keys);
+      const cols = colsFor(set.keys, d);
       page(set.title);
-      table(cols.map((c) => c.h), d.rows.map((r) => cols.map((c) => fmtCell(c, r).replace("−", "-"))), 28, 7.5);
+      table(cols.map((c) => c.h), d.rows.map((r) => cols.map((c) => plain(fmtCell(c, r)))), 28, 7.5);
     });
   }
-  if (want.sectors) { page("Sector allocation"); const t = sectorTable(d); table(t.head, t.body); }
-  if (want.caps) { page("Market cap mix"); const t = capTable(d); table(t.head, t.body); }
+  if (want.sectors) { page("Sector allocation"); const t = sectorTable(d); table(t.head, t.body.map((r) => r.map(plain))); }
+  if (want.caps && d.hasCaps) { page("Market cap mix"); const t = capTable(d); table(t.head, t.body); }
 
   const pages = doc.getNumberOfPages();
   for (let i = 1; i <= pages; i++) {
     doc.setPage(i); doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(137, 135, 129);
-    doc.text(`Risk Sheet · ${stamp()}`, M, 203); doc.text(`${i} / ${pages}`, W - M, 203, { align: "right" });
+    doc.text(`Risk Sheet - ${d.marketLabel} - ${stamp()}`, M, 203); doc.text(`${i} / ${pages}`, W - M, 203, { align: "right" });
   }
   doc.save(fileName("pdf"));
 }
@@ -139,7 +142,7 @@ async function buildPdf(d, want, images) {
 async function buildPptx(d, want, images) {
   const pptx = new window.PptxGenJS();
   pptx.layout = "LAYOUT_WIDE"; // 13.33 x 7.5 in
-  pptx.title = "Portfolio risk report";
+  pptx.title = reportTitle(d);
   const head = (slide, title, note) => {
     slide.addText(title, { x: 0.5, y: 0.3, w: 12.3, h: 0.6, fontSize: 24, bold: true, color: "0B0B0B", fontFace: "Calibri" });
     if (note) slide.addText(note, { x: 0.5, y: 0.85, w: 12.3, h: 0.35, fontSize: 12, color: "76746E", fontFace: "Calibri" });
@@ -156,17 +159,17 @@ async function buildPptx(d, want, images) {
 
   const cover = pptx.addSlide();
   cover.background = { color: BLUE };
-  cover.addText("Portfolio risk report", { x: 0.8, y: 2.6, w: 11.7, h: 1, fontSize: 44, bold: true, color: "FFFFFF", fontFace: "Calibri" });
+  cover.addText(reportTitle(d), { x: 0.8, y: 2.6, w: 11.7, h: 1, fontSize: 44, bold: true, color: "FFFFFF", fontFace: "Calibri" });
   cover.addText(`Generated ${stamp()}`, { x: 0.8, y: 3.7, w: 11.7, h: 0.5, fontSize: 18, color: "E6F0FC", fontFace: "Calibri" });
 
   if (want.summary) {
     const slide = pptx.addSlide();
     head(slide, "Summary");
     summaryItems(d).forEach(([label, value], i) => {
-      const x = 0.5 + (i % 4) * 3.1, y = 1.4 + Math.floor(i / 4) * 2.2;
-      slide.addShape(pptx.ShapeType.roundRect, { x, y, w: 2.9, h: 1.9, fill: { color: "F9F9F7" }, line: { color: "E1E0D9", width: 1 }, rectRadius: 0.08 });
-      slide.addText(label, { x: x + 0.2, y: y + 0.25, w: 2.5, h: 0.4, fontSize: 13, color: "76746E", fontFace: "Calibri" });
-      slide.addText(value, { x: x + 0.2, y: y + 0.75, w: 2.5, h: 0.8, fontSize: 20, bold: true, color: "0B0B0B", fontFace: "Calibri", fit: "shrink" });
+      const x = 0.5 + (i % 3) * 4.15, y = 1.3 + Math.floor(i / 3) * 1.95;
+      slide.addShape(pptx.ShapeType.roundRect, { x, y, w: 3.95, h: 1.75, fill: { color: "F9F9F7" }, line: { color: "E1E0D9", width: 1 }, rectRadius: 0.08 });
+      slide.addText(label, { x: x + 0.2, y: y + 0.2, w: 3.55, h: 0.4, fontSize: 13, color: "76746E", fontFace: "Calibri" });
+      slide.addText(value, { x: x + 0.2, y: y + 0.7, w: 3.55, h: 0.8, fontSize: 20, bold: true, color: "0B0B0B", fontFace: "Calibri", fit: "shrink" });
     });
   }
   if (want.charts) {
@@ -177,9 +180,9 @@ async function buildPptx(d, want, images) {
       slide.addImage({ data: img.data, x: 0.5 + (12.3 - s.w) / 2, y: 1.35, w: s.w, h: s.h });
     });
   }
-  if (want.positions) POSITION_SETS.forEach((set) => { const cols = colsFor(set.keys); tableSlides(set.title, cols.map((c) => c.h), d.rows.map((r) => cols.map((c) => fmtCell(c, r)))); });
+  if (want.positions) POSITION_SETS.forEach((set) => { const cols = colsFor(set.keys, d); tableSlides(set.title, cols.map((c) => c.h), d.rows.map((r) => cols.map((c) => fmtCell(c, r)))); });
   if (want.sectors) { const t = sectorTable(d); tableSlides("Sector allocation", t.head, t.body); }
-  if (want.caps) { const t = capTable(d); tableSlides("Market cap mix", t.head, t.body); }
+  if (want.caps && d.hasCaps) { const t = capTable(d); tableSlides("Market cap mix", t.head, t.body); }
   await pptx.writeFile({ fileName: fileName("pptx") });
 }
 
@@ -194,21 +197,22 @@ async function buildXlsx(d, want, images) {
     row.alignment = { vertical: "middle", horizontal: "center" };
     ws.views = [{ state: "frozen", xSplit: 1, ySplit: 1 }];
   };
-  const fmts = { money: "$#,##0.00", pct: "0.00%", delta: "0.00%", shares: "#,##0.####" };
+  const fmts = { money: d.market === "bh" ? '"BD "#,##0.000' : "$#,##0.00", pct: "0.00%", delta: "0.00%", shares: "#,##0.####" };
 
   if (want.summary) {
     const ws = wb.addWorksheet("Summary");
     ws.columns = [{ header: "Metric", key: "m", width: 34 }, { header: "Value", key: "v", width: 22 }];
-    const t = d.totals;
-    [["Total portfolio value", t.total, fmts.money], ["Invested", t.invested, fmts.money], ["Cash", t.cash, fmts.money],
+    const t = d.totals, p = d.performance || {};
+    [["Market", d.marketLabel, null], ["Total portfolio value", t.total, fmts.money], ["Invested", t.invested, fmts.money], ["Cash", t.cash, fmts.money],
      ["Cost of positions", t.cost, fmts.money], ["Unrealised profit / loss", t.pnl, fmts.money], ["Unrealised profit / loss %", t.pnl_pct, fmts.pct],
+     ["Your return", p.portfolio_return ?? null, fmts.pct], [`${d.benchmark.name} return`, p.benchmark_return ?? null, fmts.pct],
      ["Portfolio beta", t.beta, "0.00"], ["Expected return (CAPM)", t.expected_return, fmts.pct], ["Value at risk (1 day, 95%)", t.var, fmts.money],
      ["Positions", t.positions, "0"], ["Generated", stamp(), null]].forEach(([m, v, f]) => { const r = ws.addRow({ m, v }); if (f) r.getCell(2).numFmt = f; });
     styleHead(ws);
   }
   if (want.positions) {
     const ws = wb.addWorksheet("Positions");
-    const cols = COLS.map((c) => (c.k === "cap_formatted" ? { ...c, k: "market_cap", type: "money0" } : c));
+    const cols = activeCols(d).map((c) => (c.k === "cap_formatted" ? { ...c, k: "market_cap", type: "money0" } : c));
     ws.columns = cols.map((c) => ({ header: c.h, key: c.k, width: Math.max(13, c.h.length + 3) }));
     d.rows.forEach((r) => ws.addRow(Object.fromEntries(cols.map((c) => [c.k, r[c.k] ?? null]))));
     cols.forEach((c, i) => {
@@ -219,17 +223,27 @@ async function buildXlsx(d, want, images) {
   }
   if (want.sectors) {
     const ws = wb.addWorksheet("Sectors");
-    ws.columns = [["Sector", "sector", 28], ["Stocks", "count", 10], ["Total value", "total_value", 16], ["Weight", "weight", 12], ["Target", "set_allocation", 12], ["Target value", "allocation_goal", 16], ["S&P 500 weight", "market_weight", 16]].map(([header, key, width]) => ({ header, key, width }));
+    const sc = [["Sector", "sector", 28], ["Stocks", "count", 10], ["Total value", "total_value", 16], ["Weight", "weight", 12], ["Target", "set_allocation", 12], ["Target value", "allocation_goal", 16]];
+    if (d.hasMarketWeights) sc.push(["S&P 500 weight", "market_weight", 16]);
+    ws.columns = sc.map(([header, key, width]) => ({ header, key, width }));
     d.sectors.forEach((s) => ws.addRow(s));
     [3, 6].forEach((i) => (ws.getColumn(i).numFmt = fmts.money));
-    [4, 5, 7].forEach((i) => (ws.getColumn(i).numFmt = fmts.pct));
+    [4, 5, 7].slice(0, d.hasMarketWeights ? 3 : 2).forEach((i) => (ws.getColumn(i).numFmt = fmts.pct));
     styleHead(ws);
   }
-  if (want.caps) {
+  if (want.caps && d.hasCaps) {
     const ws = wb.addWorksheet("Market cap");
     ws.columns = [{ header: "Category", key: "category", width: 18 }, { header: "Count", key: "count", width: 10 }, { header: "Share of value", key: "pct", width: 16 }];
     d.caps.forEach((c) => ws.addRow(c));
     ws.getColumn(3).numFmt = fmts.pct;
+    styleHead(ws);
+  }
+  if (want.summary && d.performance) {
+    const ws = wb.addWorksheet("Performance");
+    const p = d.performance;
+    ws.columns = [{ header: "Day", key: "day", width: 14 }, { header: "Your portfolio return", key: "a", width: 24 }, { header: `${d.benchmark.name} return`, key: "b", width: 30 }];
+    p.days.forEach((day, i) => ws.addRow({ day, a: p.portfolio[i], b: p.benchmark ? p.benchmark[i] : null }));
+    [2, 3].forEach((i) => (ws.getColumn(i).numFmt = fmts.pct));
     styleHead(ws);
   }
   if (want.summary && d.history.length) {

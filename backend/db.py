@@ -42,6 +42,7 @@ _schema_ready = False
 SCHEMA = [
     """CREATE TABLE IF NOT EXISTS positions (
         id TEXT PRIMARY KEY,
+        market TEXT NOT NULL DEFAULT 'us',
         ticker TEXT NOT NULL,
         shares DOUBLE PRECISION NOT NULL,
         price_bought DOUBLE PRECISION NOT NULL,
@@ -55,10 +56,12 @@ SCHEMA = [
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )""",
-    """CREATE TABLE IF NOT EXISTS sector_allocations (
-        sector TEXT PRIMARY KEY,
+    """CREATE TABLE IF NOT EXISTS sector_targets (
+        market TEXT NOT NULL,
+        sector TEXT NOT NULL,
         allocation DOUBLE PRECISION NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (market, sector)
     )""",
     """CREATE TABLE IF NOT EXISTS activity_log (
         id TEXT PRIMARY KEY,
@@ -78,11 +81,20 @@ SCHEMA = [
         data TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )""",
-    """CREATE TABLE IF NOT EXISTS value_history (
-        day TEXT PRIMARY KEY,
+    """CREATE TABLE IF NOT EXISTS value_points (
+        market TEXT NOT NULL,
+        day TEXT NOT NULL,
         invested DOUBLE PRECISION NOT NULL,
         cash DOUBLE PRECISION NOT NULL,
-        total DOUBLE PRECISION NOT NULL
+        total DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (market, day)
+    )""",
+    # Index levels entered or imported by the user (used for markets with no automatic index feed).
+    """CREATE TABLE IF NOT EXISTS index_history (
+        market TEXT NOT NULL,
+        day TEXT NOT NULL,
+        close DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (market, day)
     )""",
 ]
 
@@ -185,13 +197,15 @@ def list_activity(limit: int = 200) -> List[Dict[str, Any]]:
 
 # ---------- positions ----------
 
-POS_COLS = "id, ticker, shares, price_bought, date_bought, created_at, updated_at, deleted_at"
+POS_COLS = "id, market, ticker, shares, price_bought, date_bought, created_at, updated_at, deleted_at"
 
 
-def list_positions(deleted: bool = False) -> List[Dict[str, Any]]:
-    if deleted:
-        return run(f"SELECT {POS_COLS} FROM positions WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC")
-    return run(f"SELECT {POS_COLS} FROM positions WHERE deleted_at IS NULL ORDER BY created_at ASC, id ASC")
+def list_positions(market: Optional[str] = None, deleted: bool = False) -> List[Dict[str, Any]]:
+    where = "deleted_at IS NOT NULL" if deleted else "deleted_at IS NULL"
+    order = "deleted_at DESC" if deleted else "created_at ASC, id ASC"
+    if market:
+        return run(f"SELECT {POS_COLS} FROM positions WHERE {where} AND market = ? ORDER BY {order}", (market,))
+    return run(f"SELECT {POS_COLS} FROM positions WHERE {where} ORDER BY {order}")
 
 
 def get_position(pid: str) -> Optional[Dict[str, Any]]:
@@ -199,14 +213,14 @@ def get_position(pid: str) -> Optional[Dict[str, Any]]:
     return rows[0] if rows else None
 
 
-def create_position(ticker: str, shares: float, price_bought: float, date_bought: Optional[str]) -> Dict[str, Any]:
+def create_position(market: str, ticker: str, shares: float, price_bought: float, date_bought: Optional[str]) -> Dict[str, Any]:
     pid = uuid.uuid4().hex
     # Microsecond precision keeps positions in the order they were entered.
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     run(
-        "INSERT INTO positions (id, ticker, shares, price_bought, date_bought, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (pid, ticker, shares, price_bought, date_bought, ts, ts),
+        "INSERT INTO positions (id, market, ticker, shares, price_bought, date_bought, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (pid, market, ticker, shares, price_bought, date_bought, ts, ts),
     )
     pos = get_position(pid)
     log("position_added", pos)
@@ -265,34 +279,56 @@ def set_setting(key: str, value: str) -> None:
     )
 
 
-def get_cash() -> float:
+def get_cash(market: str) -> float:
     try:
-        return float(get_setting("cash", "0") or 0)
+        return float(get_setting(f"cash:{market}", "0") or 0)
     except ValueError:
         return 0.0
 
 
-def set_cash(amount: float) -> float:
-    before = get_cash()
-    set_setting("cash", repr(float(amount)))
-    log("cash_changed", {"before": before, "after": amount})
+def set_cash(market: str, amount: float) -> float:
+    before = get_cash(market)
+    set_setting(f"cash:{market}", repr(float(amount)))
+    log("cash_changed", {"market": market, "before": before, "after": amount})
     return amount
 
 
-# ---------- sector allocations ----------
+# ---------- sector targets ----------
 
-def get_allocations() -> Dict[str, float]:
-    return {r["sector"]: float(r["allocation"]) for r in run("SELECT sector, allocation FROM sector_allocations")}
+def get_allocations(market: str) -> Dict[str, float]:
+    rows = run("SELECT sector, allocation FROM sector_targets WHERE market = ?", (market,))
+    return {r["sector"]: float(r["allocation"]) for r in rows}
 
 
-def set_allocation(sector: str, allocation: float) -> None:
-    before = get_allocations().get(sector, 0.0)
+def set_allocation(market: str, sector: str, allocation: float) -> None:
+    before = get_allocations(market).get(sector, 0.0)
     run(
-        "INSERT INTO sector_allocations (sector, allocation, updated_at) VALUES (?, ?, ?) "
-        "ON CONFLICT (sector) DO UPDATE SET allocation = excluded.allocation, updated_at = excluded.updated_at",
-        (sector, allocation, now()),
+        "INSERT INTO sector_targets (market, sector, allocation, updated_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (market, sector) DO UPDATE SET allocation = excluded.allocation, updated_at = excluded.updated_at",
+        (market, sector, allocation, now()),
     )
-    log("target_changed", {"sector": sector, "before": before, "after": allocation})
+    log("target_changed", {"market": market, "sector": sector, "before": before, "after": allocation})
+
+
+# ---------- index levels supplied by the user ----------
+
+def upsert_index_points(market: str, points: List[Dict[str, Any]]) -> int:
+    for i in range(0, len(points), 400):
+        chunk = points[i:i + 400]
+        marks = ",".join("(?, ?, ?)" for _ in chunk)
+        params: list = []
+        for pt in chunk:
+            params += [market, pt["day"], float(pt["close"])]
+        run(f"INSERT INTO index_history (market, day, close) VALUES {marks} "
+            "ON CONFLICT (market, day) DO UPDATE SET close = excluded.close", tuple(params))
+    if points:
+        days = sorted(pt["day"] for pt in points)
+        log("index_imported", {"market": market, "count": len(points), "from": days[0], "to": days[-1]})
+    return len(points)
+
+
+def list_index_history(market: str) -> List[Dict[str, Any]]:
+    return run("SELECT day, close FROM index_history WHERE market = ? ORDER BY day ASC", (market,))
 
 
 # ---------- market-data caches (safe to lose, kept so the app works when the feed is down) ----------
@@ -332,13 +368,13 @@ def set_metrics(position_id: str, data: Dict[str, Any]) -> None:
     )
 
 
-def record_value(day: str, invested: float, cash: float) -> None:
+def record_value(market: str, day: str, invested: float, cash: float) -> None:
     run(
-        "INSERT INTO value_history (day, invested, cash, total) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT (day) DO UPDATE SET invested = excluded.invested, cash = excluded.cash, total = excluded.total",
-        (day, invested, cash, invested + cash),
+        "INSERT INTO value_points (market, day, invested, cash, total) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT (market, day) DO UPDATE SET invested = excluded.invested, cash = excluded.cash, total = excluded.total",
+        (market, day, invested, cash, invested + cash),
     )
 
 
-def list_value_history() -> List[Dict[str, Any]]:
-    return run("SELECT day, invested, cash, total FROM value_history ORDER BY day ASC")
+def list_value_history(market: str) -> List[Dict[str, Any]]:
+    return run("SELECT day, invested, cash, total FROM value_points WHERE market = ? ORDER BY day ASC", (market,))

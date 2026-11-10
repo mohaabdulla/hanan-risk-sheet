@@ -1,12 +1,14 @@
 """
-Market data + risk calculations.
+Market data + risk calculations for both markets (United States and Bahrain).
 
 Same measures as the original RiskSheet: 14-day ATR (entry and current), ATR-based
-take-profit / stop-loss, beta vs SPY, CAPM expected return, Monte Carlo VaR (95%),
-a Black-Scholes volatility estimate, weights, market-cap tier and sector.
+take-profit / stop-loss, beta, CAPM expected return, Monte Carlo VaR (95%), a
+Black-Scholes volatility estimate, weights, market-cap tier and sector. Added: a
+performance series comparing the portfolio with the market benchmark.
 """
 import json
 import math
+import re
 import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
@@ -20,29 +22,80 @@ import yfinance as yf
 from backend import db
 
 RISK_FREE_RATE = 0.0488
-MARKET_PROXY = "SPY"
+SECTOR_WEIGHTS_FUND = "SPY"   # S&P 500 sector mix, shown on the US sector page
 ATR_WINDOW = 14
 VAR_SIMULATIONS = 5000
 VAR_CONFIDENCE = 0.95
 IV_TENOR_DAYS = 30
 MIN_HISTORY_YEARS = 5
-MISSING_TTL = 600          # seconds before an unknown symbol is tried again
 PRICE_TTL = 300            # seconds
 META_TTL = 7 * 24 * 3600   # seconds
+MISSING_TTL = 600          # seconds before an unknown symbol is tried again
+MAX_CHART_POINTS = 400
+
+US_BENCHMARKS = {
+    "^GSPC": "S&P 500",
+    "^NDX": "Nasdaq 100",
+    "^IXIC": "Nasdaq Composite",
+    "^DJI": "Dow Jones Industrial Average",
+    "^RUT": "Russell 2000",
+}
+US_SECTORS = ["Basic Materials", "Communication Services", "Consumer Cyclical", "Consumer Defensive", "Energy",
+              "Financial Services", "Healthcare", "Industrials", "Real Estate", "Technology", "Utilities"]
+BH_SECTORS = ["Communication Services", "Consumer Discretionary", "Consumer Staples", "Financials",
+              "Industrials", "Materials", "Real Estate"]
+
+MARKETS = {
+    "us": {"name": "United States", "currency": "USD", "decimals": 2, "sectors": US_SECTORS, "suffix": ""},
+    "bh": {"name": "Bahrain", "currency": "BHD", "decimals": 3, "sectors": BH_SECTORS, "suffix": ".BH"},
+}
+BH_INDEX_NAME = "Bahrain All Share Index"
+
+# The price feed has no company details for Bahrain Bourse listings, so names and sectors
+# for the main listings are kept here. Anything not listed shows as "Unknown".
+BH_COMPANIES = {
+    "ALBH": ("Aluminium Bahrain (Alba)", "Materials"),
+    "NBB": ("National Bank of Bahrain", "Financials"),
+    "BBK": ("BBK", "Financials"),
+    "SALAM": ("Al Salam Bank", "Financials"),
+    "BISB": ("Bahrain Islamic Bank", "Financials"),
+    "KHCB": ("Khaleeji Bank", "Financials"),
+    "GFH": ("GFH Financial Group", "Financials"),
+    "ABC": ("Bank ABC", "Financials"),
+    "ITHMR": ("Ithmaar Holding", "Financials"),
+    "BARKA": ("Al Baraka Group", "Financials"),
+    "ESTERAD": ("Esterad Investment Company", "Financials"),
+    "INOVEST": ("Inovest", "Financials"),
+    "BCFC": ("Bahrain Commercial Facilities Company", "Financials"),
+    "BKIC": ("Bahrain Kuwait Insurance Company", "Financials"),
+    "SOLID": ("Solidarity Bahrain", "Financials"),
+    "ARIG": ("Arab Insurance Group", "Financials"),
+    "BNH": ("Bahrain National Holding", "Financials"),
+    "TAKAFUL": ("Takaful International", "Financials"),
+    "UGH": ("United Gulf Holding", "Financials"),
+    "BEYON": ("Beyon", "Communication Services"),
+    "BATELCO": ("Batelco", "Communication Services"),
+    "ZAINBH": ("Zain Bahrain", "Communication Services"),
+    "SEEF": ("Seef Properties", "Real Estate"),
+    "APMTB": ("APM Terminals Bahrain", "Industrials"),
+    "NASS": ("Nass Corporation", "Industrials"),
+    "BASREC": ("Bahrain Ship Repairing and Engineering", "Industrials"),
+    "BMMI": ("BMMI", "Consumer Staples"),
+    "TRAFCO": ("Trafco Group", "Consumer Staples"),
+    "POLTRY": ("Delmon Poultry", "Consumer Staples"),
+    "BFM": ("Bahrain Flour Mills", "Consumer Staples"),
+    "DUTYF": ("Bahrain Duty Free", "Consumer Discretionary"),
+    "GHG": ("Gulf Hotels Group", "Consumer Discretionary"),
+    "CINECO": ("Bahrain Cinema Company", "Consumer Discretionary"),
+}
 
 SECTOR_NAMES = {
-    "realestate": "Real Estate",
-    "consumer_cyclical": "Consumer Cyclical",
-    "basic_materials": "Basic Materials",
-    "consumer_defensive": "Consumer Defensive",
-    "technology": "Technology",
-    "communication_services": "Communication Services",
-    "financial_services": "Financial Services",
-    "utilities": "Utilities",
-    "industrials": "Industrials",
-    "energy": "Energy",
-    "healthcare": "Healthcare",
+    "realestate": "Real Estate", "consumer_cyclical": "Consumer Cyclical", "basic_materials": "Basic Materials",
+    "consumer_defensive": "Consumer Defensive", "technology": "Technology",
+    "communication_services": "Communication Services", "financial_services": "Financial Services",
+    "utilities": "Utilities", "industrials": "Industrials", "energy": "Energy", "healthcare": "Healthcare",
 }
+BENCHMARK_RE = re.compile(r"^[A-Z0-9.\-^=]{1,12}$")
 
 _HIST: Dict[str, tuple] = {}
 _MISSING: Dict[str, float] = {}
@@ -70,17 +123,59 @@ def _age_seconds(iso: Optional[str]) -> float:
         return float("inf")
 
 
+def feed_symbol(market: str, ticker: str) -> str:
+    suffix = MARKETS[market]["suffix"]
+    return ticker if not suffix or "." in ticker else ticker + suffix
+
+
+# ---------- benchmark ----------
+
+def get_benchmark(market: str) -> Dict[str, Any]:
+    if market == "bh":
+        return {"symbol": None, "name": BH_INDEX_NAME, "source": "import"}
+    symbol = db.get_setting("benchmark:us", "^GSPC") or "^GSPC"
+    return {"symbol": symbol, "name": US_BENCHMARKS.get(symbol, symbol), "source": "feed"}
+
+
+def set_benchmark(symbol: str) -> Dict[str, Any]:
+    symbol = (symbol or "").strip().upper()
+    if not BENCHMARK_RE.match(symbol):
+        raise ValueError("Enter a valid index or fund symbol, for example ^GSPC or QQQ")
+    if symbol not in US_BENCHMARKS:
+        start = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+        if symbol not in _history([symbol], start):
+            raise ValueError(f"No market data was found for {symbol}")
+    before = db.get_setting("benchmark:us", "^GSPC")
+    db.set_setting("benchmark:us", symbol)
+    db.log("benchmark_changed", {"market": "us", "before": before, "after": symbol})
+    return get_benchmark("us")
+
+
+def market_config(market: str) -> Dict[str, Any]:
+    cfg = {k: v for k, v in MARKETS[market].items() if k != "suffix"}
+    cfg["market"] = market
+    cfg["benchmark"] = get_benchmark(market)
+    if market == "us":
+        cfg["benchmark_options"] = [{"symbol": s, "name": n} for s, n in US_BENCHMARKS.items()]
+    else:
+        pts = db.list_index_history(market)
+        cfg["index_points"] = len(pts)
+        cfg["index_from"] = pts[0]["day"] if pts else None
+        cfg["index_to"] = pts[-1]["day"] if pts else None
+    return cfg
+
+
 # ---------- data fetch ----------
 
-def _history(tickers: List[str], start: str) -> Dict[str, pd.DataFrame]:
-    """Daily bars from `start` for each ticker, fetched in one batch and cached in memory."""
+def _history(symbols: List[str], start: str) -> Dict[str, pd.DataFrame]:
+    """Daily bars from `start` for each symbol, fetched in one batch and cached in memory."""
     now = time.time()
 
     def fresh(t):
         hit = _HIST.get(t)
         return hit and now - hit[0] < PRICE_TTL and hit[2] <= start
 
-    need = [t for t in tickers if not fresh(t) and now - _MISSING.get(t, 0) > MISSING_TTL]
+    need = [t for t in symbols if not fresh(t) and now - _MISSING.get(t, 0) > MISSING_TTL]
     if need:
         try:
             data = yf.download(need, start=start, auto_adjust=True, group_by="ticker",
@@ -103,22 +198,22 @@ def _history(tickers: List[str], start: str) -> Dict[str, pd.DataFrame]:
             elif data is not None and not data.empty:
                 _MISSING[t] = now  # the feed answered, but not for this symbol
     # A stale cached series is better than nothing when the feed is failing.
-    return {t: _HIST[t][1] for t in tickers if t in _HIST}
+    return {t: _HIST[t][1] for t in symbols if t in _HIST}
 
 
-def _fetch_info(ticker: str) -> Optional[Dict[str, Any]]:
+def _fetch_info(symbol: str) -> Optional[Dict[str, Any]]:
     try:
-        info = yf.Ticker(ticker).info or {}
+        info = yf.Ticker(symbol).info or {}
         if not info.get("sector") and not info.get("marketCap"):
             return None
         return {"sector": info.get("sector"), "market_cap": info.get("marketCap"),
                 "name": info.get("shortName") or info.get("longName")}
     except Exception as exc:
-        print(f"info fetch failed for {ticker}: {exc}")
+        print(f"info fetch failed for {symbol}: {exc}")
         return None
 
 
-def _meta(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+def _meta_us(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     cached = db.get_meta(tickers)
     now = time.time()
     stale = [t for t in tickers
@@ -133,6 +228,14 @@ def _meta(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
     return cached
 
 
+def _meta_bh(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+    out = {}
+    for t in tickers:
+        name, sector = BH_COMPANIES.get(t.split(".")[0], (None, None))
+        out[t] = {"name": name, "sector": sector, "market_cap": None}
+    return out
+
+
 def _market_sector_weights() -> Dict[str, float]:
     row = db.get_setting_row("market_sector_weights")
     if row and _age_seconds(row["updated_at"]) < META_TTL:
@@ -142,10 +245,9 @@ def _market_sector_weights() -> Dict[str, float]:
             pass
     weights: Dict[str, float] = {}
     try:
-        raw = yf.Ticker(MARKET_PROXY).funds_data.sector_weightings or {}
+        raw = yf.Ticker(SECTOR_WEIGHTS_FUND).funds_data.sector_weightings or {}
         for key, val in raw.items():
-            name = SECTOR_NAMES.get(str(key).lower().replace(" ", "_"), str(key))
-            weights[name] = float(val)
+            weights[SECTOR_NAMES.get(str(key).lower().replace(" ", "_"), str(key))] = float(val)
     except Exception as exc:
         print(f"sector weights fetch failed: {exc}")
     if weights:
@@ -157,6 +259,13 @@ def _market_sector_weights() -> Dict[str, float]:
         except Exception:
             pass
     return {}
+
+
+def _imported_index(market: str) -> Optional[pd.Series]:
+    pts = db.list_index_history(market)
+    if len(pts) < 2:
+        return None
+    return pd.Series([float(p["close"]) for p in pts], index=pd.to_datetime([p["day"] for p in pts])).sort_index()
 
 
 # ---------- maths ----------
@@ -207,9 +316,9 @@ def _atr_series(history: pd.DataFrame) -> pd.Series:
     return tr.rolling(window=ATR_WINDOW).mean()
 
 
-def _log_returns(history: pd.DataFrame) -> pd.Series:
-    closes = history["Close"]
-    return np.log(closes / closes.shift(1)).dropna()
+def _log_returns(closes: pd.Series) -> pd.Series:
+    r = np.log(closes / closes.shift(1))
+    return r.replace([np.inf, -np.inf], np.nan).dropna()
 
 
 def _beta(stock: pd.Series, market: pd.Series) -> Optional[float]:
@@ -254,20 +363,28 @@ def _cap_tier(val: Optional[float]) -> Optional[str]:
     return "Micro Cap"
 
 
+def _parse_day(value: Optional[str]) -> Optional[datetime]:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+
+
 def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
-         market_returns: Optional[pd.Series]) -> Dict[str, Any]:
+         market_returns: Optional[pd.Series], decimals: int) -> Dict[str, Any]:
     ticker = pos["ticker"]
     shares = float(pos["shares"])
     price_bought = float(pos["price_bought"])
     closes = history["Close"]
     current_price = round(float(closes.iloc[-1]), 4)
-    returns = _log_returns(history)
-    position_value = round(current_price * shares, 2)
+    returns = _log_returns(closes)
+    position_value = round(current_price * shares, decimals)
 
     atr = _atr_series(history)
     current_atr = round(float(atr.iloc[-1]), 4) if not np.isnan(atr.iloc[-1]) else None
 
-    # Purchase date: what the user entered, otherwise the most recent day the price traded there.
+    # Purchase date: what the user entered. Older rows saved without one fall back to the
+    # most recent day the price traded there.
     date_bought = pos.get("date_bought") or None
     date_inferred = False
     if not date_bought and price_bought > 0:
@@ -278,15 +395,12 @@ def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
 
     entry_atr = None
     holding_period = None
-    if date_bought:
-        try:
-            dt = datetime.strptime(date_bought, "%Y-%m-%d")
-            holding_period = max((datetime.now() - dt).days, 0)
-            idx = history.index.get_indexer([dt], method="pad")[0]
-            if idx != -1 and not np.isnan(atr.iloc[idx]):
-                entry_atr = round(float(atr.iloc[idx]), 4)
-        except Exception:
-            pass
+    dt = _parse_day(date_bought)
+    if dt:
+        holding_period = max((datetime.now() - dt).days, 0)
+        idx = history.index.get_indexer([dt], method="pad")[0]
+        if idx != -1 and not np.isnan(atr.iloc[idx]):
+            entry_atr = round(float(atr.iloc[idx]), 4)
 
     beta = _beta(returns, market_returns) if market_returns is not None else None
     expected_return = None
@@ -295,6 +409,7 @@ def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
         expected_return = round(RISK_FREE_RATE + beta * (annual_market - RISK_FREE_RATE), 6)
 
     market_cap = meta.get("market_cap")
+    px = max(decimals, 2)
     return {
         "id": pos["id"],
         "ticker": ticker,
@@ -304,7 +419,7 @@ def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
         "date_bought": date_bought,
         "date_inferred": date_inferred,
         "sector": meta.get("sector") or "Unknown",
-        "value_paid": round(price_bought * shares, 2),
+        "value_paid": round(price_bought * shares, decimals),
         "current_price": current_price,
         "position_value": position_value,
         "pct_change": round((current_price - price_bought) / price_bought, 4) if price_bought > 0 else None,
@@ -312,10 +427,10 @@ def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
         "entry_atr": entry_atr,
         "atr_change": round(current_atr - entry_atr, 4) if current_atr is not None and entry_atr is not None else None,
         "no_atrs": round((current_price - price_bought) / entry_atr, 4) if entry_atr else None,
-        "take_profit": round(price_bought + 2 * entry_atr, 2) if entry_atr else None,
-        "stop_loss": round(price_bought - 2 * entry_atr, 2) if entry_atr else None,
-        "current_tp": round(current_price + 2 * current_atr, 2) if current_atr else None,
-        "current_sl": round(current_price - 2 * current_atr, 2) if current_atr else None,
+        "take_profit": round(price_bought + 2 * entry_atr, px) if entry_atr else None,
+        "stop_loss": round(price_bought - 2 * entry_atr, px) if entry_atr else None,
+        "current_tp": round(current_price + 2 * current_atr, px) if current_atr else None,
+        "current_sl": round(current_price - 2 * current_atr, px) if current_atr else None,
         "beta": beta,
         "expected_return": expected_return,
         "var": _var(ticker, position_value, returns.to_numpy()),
@@ -330,55 +445,150 @@ def _row(pos: Dict[str, Any], history: pd.DataFrame, meta: Dict[str, Any],
     }
 
 
-def compute(positions: List[Dict[str, Any]], cash: float) -> Dict[str, Any]:
-    tickers = sorted({p["ticker"] for p in positions})
+def _performance(items: List[tuple], bench: Optional[pd.Series], bench_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Return on the money invested, day by day, next to what the same money would have
+    returned in the benchmark (each purchase is matched by buying the index on the same day).
+    If index data starts after the first purchase, the two lines start together on the first
+    day the index is available.
+    """
+    lots = []
+    for pos, hist in items:
+        dt = _parse_day(pos.get("date_bought"))
+        if dt and hist is not None and not hist.empty:
+            lots.append((dt, float(pos["shares"]), float(pos["price_bought"]), hist["Close"]))
+    if not lots:
+        return None
+    start = min(l[0] for l in lots)
+    days = set()
+    for _, _, _, closes in lots:
+        days.update(closes.index[closes.index >= start])
+    idx = pd.DatetimeIndex(sorted(days))
+    if len(idx) < 2:
+        return None
+
+    def align(series: pd.Series) -> pd.Series:
+        return series.reindex(series.index.union(idx)).ffill().reindex(idx)
+
+    value = pd.Series(0.0, index=idx)
+    cost = pd.Series(0.0, index=idx)
+    lot_values = []
+    for dt, shares, price, closes in lots:
+        held = idx >= dt
+        v = (align(closes).bfill() * shares).where(held, 0.0)
+        lot_values.append((dt, shares * price, held, v))
+        value += v
+        cost += pd.Series(np.where(held, shares * price, 0.0), index=idx)
+    have = cost > 0
+    portfolio = (value / cost - 1).where(have)
+
+    benchmark = None
+    compare_from = None
+    if bench is not None and len(bench) >= 2:
+        b = align(bench)
+        covered = b.notna()
+        if covered.any() and covered.sum() >= 2:
+            t0 = idx[covered.values][0]
+            compare_from = max(t0, start)
+            bvalue = pd.Series(0.0, index=idx)
+            for dt, money, held, v in lot_values:
+                active = held & (idx >= compare_from)
+                if not active.any():
+                    continue
+                first = idx[active][0]
+                # Bought before index data begins: carry the position's value on that day into the index.
+                stake = money if dt >= compare_from else float(v.loc[first])
+                base = float(b.loc[first])
+                if base > 0:
+                    bvalue += (b / base * stake).where(active, 0.0)
+            benchmark = (bvalue / cost - 1).where(have & (idx >= compare_from))
+
+    step = max(1, math.ceil(len(idx) / MAX_CHART_POINTS))
+    keep = list(range(0, len(idx), step))
+    if keep[-1] != len(idx) - 1:
+        keep.append(len(idx) - 1)
+    pick = lambda s: [_clean(round(float(x), 5)) if pd.notna(x) else None for x in s.iloc[keep]]
+    last = lambda s: next((round(float(x), 5) for x in reversed(s.tolist()) if pd.notna(x)), None)
+    port_at_start = None
+    if benchmark is not None and compare_from is not None and pd.notna(portfolio.loc[compare_from]):
+        port_at_start = float(portfolio.loc[compare_from])
+    return {
+        "days": [d.strftime("%Y-%m-%d") for d in idx[keep]],
+        "portfolio": pick(portfolio),
+        "benchmark": pick(benchmark) if benchmark is not None else None,
+        "benchmark_name": bench_name,
+        "compare_from": compare_from.strftime("%Y-%m-%d") if compare_from is not None else None,
+        "starts": start.strftime("%Y-%m-%d"),
+        "portfolio_return": last(portfolio),
+        "benchmark_return": last(benchmark) if benchmark is not None else None,
+        "portfolio_return_since_compare": (round((1 + last(portfolio)) / (1 + port_at_start) - 1, 5)
+                                           if port_at_start is not None and last(portfolio) is not None else None),
+    }
+
+
+def compute(market: str) -> Dict[str, Any]:
+    cfg = MARKETS[market]
+    decimals = cfg["decimals"]
+    positions = db.list_positions(market)
+    cash = db.get_cash(market)
+    bench_info = get_benchmark(market)
+
+    symbols = {p["id"]: feed_symbol(market, p["ticker"]) for p in positions}
+    wanted = sorted(set(symbols.values()))
     histories: Dict[str, pd.DataFrame] = {}
     meta: Dict[str, Dict[str, Any]] = {}
     sector_weights: Dict[str, float] = {}
-    if tickers:
-        # Go back far enough to cover the oldest purchase, and at least five years for beta / VaR.
-        floor = datetime.now() - timedelta(days=365 * MIN_HISTORY_YEARS)
-        dates = [floor]
-        for p in positions:
-            try:
-                dates.append(datetime.strptime(p["date_bought"], "%Y-%m-%d") - timedelta(days=90))
-            except (TypeError, ValueError):
-                pass
-        start = min(dates).strftime("%Y-%m-01")
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            f_hist = pool.submit(_history, tickers + [MARKET_PROXY], start)
-            f_weights = pool.submit(_market_sector_weights)
-            histories = f_hist.result()
-            sector_weights = f_weights.result()
-        meta = _meta([t for t in tickers if t in histories])
-    market_hist = histories.get(MARKET_PROXY)
-    market_returns = _log_returns(market_hist) if market_hist is not None else None
-    saved = db.get_metrics() if positions else {}
+    bench_close: Optional[pd.Series] = None
+    feed_ok = True
 
+    if wanted:
+        # Go back far enough to cover the oldest purchase, and at least five years for beta / VaR.
+        dates = [datetime.now() - timedelta(days=365 * MIN_HISTORY_YEARS)]
+        dates += [d - timedelta(days=90) for d in (_parse_day(p.get("date_bought")) for p in positions) if d]
+        start = min(dates).strftime("%Y-%m-01")
+        extra = [bench_info["symbol"]] if bench_info["symbol"] else []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_hist = pool.submit(_history, wanted + extra, start)
+            f_weights = pool.submit(_market_sector_weights) if market == "us" else None
+            histories = f_hist.result()
+            sector_weights = f_weights.result() if f_weights else {}
+        found = [s for s in wanted if s in histories]
+        feed_ok = bool(found) or not wanted
+        meta = _meta_us(found) if market == "us" else _meta_bh(found)
+        if bench_info["symbol"]:
+            bh = histories.get(bench_info["symbol"])
+            bench_close = bh["Close"] if bh is not None else None
+    if market == "bh":
+        bench_close = _imported_index(market)
+    market_returns = _log_returns(bench_close) if bench_close is not None else None
+
+    saved = db.get_metrics() if positions else {}
     rows: List[Dict[str, Any]] = []
+    perf_items = []
     for pos in positions:
-        hist = histories.get(pos["ticker"])
+        sym = symbols[pos["id"]]
+        hist = histories.get(sym)
         row = None
         if hist is not None and not hist.empty:
             try:
-                row = _row(pos, hist, meta.get(pos["ticker"], {}), market_returns)
+                row = _row(pos, hist, meta.get(sym, {}), market_returns, decimals)
                 db.set_metrics(pos["id"], row)
+                perf_items.append((pos, hist))
             except Exception as exc:
                 print(f"calc failed for {pos['ticker']}: {exc}")
         if row is None:
             # Feed unavailable: fall back to the last figures we computed for this position.
             last = saved.get(pos["id"])
-            same = last and last["data"].get("ticker") == pos["ticker"]
-            if same:
+            if last and last["data"].get("ticker") == pos["ticker"]:
                 row = dict(last["data"])
                 row.update({"shares": float(pos["shares"]), "price_bought": float(pos["price_bought"]),
                             "stale": True, "error": None})
-                row["position_value"] = round((row.get("current_price") or 0) * row["shares"], 2)
-                row["value_paid"] = round(row["price_bought"] * row["shares"], 2)
+                row["position_value"] = round((row.get("current_price") or 0) * row["shares"], decimals)
+                row["value_paid"] = round(row["price_bought"] * row["shares"], decimals)
             else:
                 row = {"id": pos["id"], "ticker": pos["ticker"], "shares": float(pos["shares"]),
                        "price_bought": float(pos["price_bought"]), "date_bought": pos.get("date_bought"),
-                       "value_paid": round(float(pos["price_bought"]) * float(pos["shares"]), 2),
+                       "value_paid": round(float(pos["price_bought"]) * float(pos["shares"]), decimals),
                        "sector": None, "position_value": None, "stale": False,
                        "error": "No market data found for this ticker"}
         rows.append(row)
@@ -393,29 +603,38 @@ def compute(positions: List[Dict[str, Any]], cash: float) -> Dict[str, Any]:
 
     priced = [r for r in rows if r.get("position_value") is not None]
     cost = sum(r.get("value_paid") or 0 for r in priced)
+    has_beta = any(r.get("beta") is not None for r in rows)
     totals = {
         "cash": cash,
-        "invested": round(invested, 2),
-        "total": round(invested + cash, 2),
-        "cost": round(cost, 2),
-        "pnl": round(invested - cost, 2),
+        "invested": round(invested, decimals),
+        "total": round(invested + cash, decimals),
+        "cost": round(cost, decimals),
+        "pnl": round(invested - cost, decimals),
         "pnl_pct": round((invested - cost) / cost, 4) if cost else None,
-        "beta": round(sum(r.get("beta_weighted") or 0 for r in rows), 4) if priced else None,
-        "expected_return": round(sum(r.get("weighted_expected_return") or 0 for r in rows), 6) if priced else None,
+        "beta": round(sum(r.get("beta_weighted") or 0 for r in rows), 4) if has_beta else None,
+        "expected_return": round(sum(r.get("weighted_expected_return") or 0 for r in rows), 6) if has_beta else None,
         "var": round(sum(r.get("var") or 0 for r in rows), 2) if priced else None,
         "positions": len(rows),
     }
 
     if priced and not any(r.get("stale") for r in rows):
-        db.record_value(datetime.now(timezone.utc).strftime("%Y-%m-%d"), invested, cash)
+        db.record_value(market, datetime.now(timezone.utc).strftime("%Y-%m-%d"), invested, cash)
 
-    clean_rows = [{k: _clean(v) for k, v in r.items()} for r in rows]
+    performance = None
+    try:
+        performance = _performance(perf_items, bench_close, bench_info["name"])
+    except Exception as exc:
+        print(f"performance series failed: {exc}")
+
     return {
-        "rows": clean_rows,
+        "market": market,
+        "rows": [{k: _clean(v) for k, v in r.items()} for r in rows],
         "totals": {k: _clean(v) for k, v in totals.items()},
         "market_sector_weights": sector_weights,
-        "value_history": db.list_value_history(),
+        "value_history": db.list_value_history(market),
+        "performance": performance,
+        "benchmark": bench_info,
         "as_of": db.now(),
         "risk_free_rate": RISK_FREE_RATE,
-        "feed_ok": bool(not tickers or market_hist is not None),
+        "feed_ok": feed_ok,
     }

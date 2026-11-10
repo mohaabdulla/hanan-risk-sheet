@@ -14,6 +14,10 @@
       <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 21l6-7 5 4 7-9" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       <span>Risk Sheet</span>
     </div>
+    <div class="market-switch" role="group" aria-label="Market">
+      <a href="#/us" class="market-link" data-market="us">United States</a>
+      <a href="#/bh" class="market-link" data-market="bh">Bahrain</a>
+    </div>
     <nav class="nav" aria-label="Sections">
       <button class="nav-item active" data-view="overview">Overview</button>
       <button class="nav-item" data-view="positions">Positions</button>
@@ -30,6 +34,7 @@
   <main class="main">
     <header class="top">
       <div>
+        <p class="eyebrow" id="marketName">United States market</p>
         <h1 id="viewTitle">Overview</h1>
         <p class="muted" id="asOf">Loading portfolio…</p>
       </div>
@@ -73,14 +78,14 @@
         <div class="card-head">
           <div>
             <h2>Sector allocation</h2>
-            <p class="muted">Set a target for each sector. Targets are saved as you type and compared with your holdings and the S&amp;P 500.</p>
+            <p class="muted" id="sectorNote">Set a target for each sector. Targets are saved as you type.</p>
           </div>
           <div class="muted" id="targetSum"></div>
         </div>
         <div class="table-scroll"><table class="grid" id="sectorTable"></table></div>
       </div>
       <div class="two-col">
-        <div class="card">
+        <div class="card" id="capCard">
           <div class="card-head"><h2>Market cap mix</h2></div>
           <div class="table-scroll"><table class="grid" id="capTable"></table></div>
         </div>
@@ -109,7 +114,7 @@
         <h3>Include</h3>
         <div class="checks" id="reportSections">
           <label><input type="checkbox" value="summary" checked /> Summary figures</label>
-          <label><input type="checkbox" value="charts" checked /> All charts</label>
+          <label><input type="checkbox" value="charts" checked /> All charts, including performance vs the market</label>
           <label><input type="checkbox" value="positions" checked /> Positions table</label>
           <label><input type="checkbox" value="sectors" checked /> Sector allocation</label>
           <label><input type="checkbox" value="caps" checked /> Market cap mix</label>
@@ -145,16 +150,16 @@
   <form method="dialog" id="posForm" novalidate>
     <h2 id="posDialogTitle">Add position</h2>
     <label class="field"><span>Ticker</span>
-      <input class="input" name="ticker" required maxlength="12" autocomplete="off" placeholder="AAPL" /></label>
+      <input class="input" name="ticker" required maxlength="12" autocomplete="off" placeholder="AAPL" />
+      <small class="muted" id="tickerHint"></small></label>
     <div class="field-row">
       <label class="field"><span>Shares</span>
         <input class="input" name="shares" type="number" min="0" step="any" required placeholder="100" /></label>
-      <label class="field"><span>Price bought ($)</span>
+      <label class="field"><span id="priceLabel">Price bought ($)</span>
         <input class="input" name="price_bought" type="number" min="0" step="any" required placeholder="150.00" /></label>
     </div>
-    <label class="field"><span>Date bought <em>optional</em></span>
-      <input class="input" name="date_bought" type="date" />
-      <small class="muted">Leave empty and the most recent day the stock traded at your price is used.</small></label>
+    <label class="field"><span>Date bought</span>
+      <input class="input" name="date_bought" type="date" required /></label>
     <p class="form-error" id="posError" role="alert"></p>
     <div class="dialog-actions">
       <button class="btn" type="button" data-close>Cancel</button>
@@ -166,12 +171,33 @@
 <dialog id="cashDialog" class="dialog">
   <form method="dialog" id="cashForm" novalidate>
     <h2>Cash balance</h2>
-    <label class="field"><span>Cash ($)</span>
+    <label class="field"><span id="cashLabel">Cash ($)</span>
       <input class="input" name="amount" type="number" min="0" step="any" required /></label>
     <p class="form-error" id="cashError" role="alert"></p>
     <div class="dialog-actions">
       <button class="btn" type="button" data-close>Cancel</button>
       <button class="btn primary" type="submit">Save cash</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="indexDialog" class="dialog">
+  <form method="dialog" id="indexForm" novalidate>
+    <h2>Bahrain All Share Index data</h2>
+    <p class="muted" id="indexStatus"></p>
+    <label class="field"><span>Import a CSV file</span>
+      <input class="input" name="file" type="file" accept=".csv,text/csv,text/plain" />
+      <small class="muted">Needs a date column and a closing value column (named Price, Close or Value). The "Download Data" file from Investing.com's Bahrain All Share historical page works as it is.</small></label>
+    <div class="field-row">
+      <label class="field"><span>Or add one day: date</span>
+        <input class="input" name="day" type="date" /></label>
+      <label class="field"><span>Index close</span>
+        <input class="input" name="close" type="number" min="0" step="any" placeholder="1950.25" /></label>
+    </div>
+    <p class="form-error" id="indexError" role="alert"></p>
+    <div class="dialog-actions">
+      <button class="btn" type="button" data-close>Cancel</button>
+      <button class="btn primary" type="submit" id="indexSave">Save index data</button>
     </div>
   </form>
 </dialog>
