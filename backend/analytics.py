@@ -50,6 +50,13 @@ MARKETS = {
     "bh": {"name": "Bahrain", "currency": "BHD", "decimals": 3, "sectors": BH_SECTORS, "suffix": ".BH"},
 }
 BH_INDEX_NAME = "Bahrain All Share Index"
+BH_ESTIMATE_NAME = "Bahrain market estimate"
+# Bahrain Bourse listings with free daily price history. With no free feed for the official
+# index, the actively traded ones are averaged into a market estimate (see _bh_market_estimate).
+BH_MARKET_BASKET = ["ALBH", "NBB", "BBK", "SALAM", "BISB", "GFH", "ABC", "ITHMR", "ESTERAD", "INOVEST", "BCFC",
+                    "BKIC", "SOLID", "ARIG", "BNH", "ZAINBH", "SEEF", "BASREC", "BMMI", "DUTYF", "GHG", "CINECO"]
+BH_ACTIVE_SHARE = 0.20     # a stock counts as actively traded if its price moved on this share of days
+BH_MAX_DAILY_MOVE = 0.15   # larger one-day moves are treated as data errors (the Bourse limit is 10%)
 
 # The price feed has no company details for Bahrain Bourse listings, so names and sectors
 # for the main listings are kept here. Anything not listed shows as "Unknown".
@@ -132,7 +139,9 @@ def feed_symbol(market: str, ticker: str) -> str:
 
 def get_benchmark(market: str) -> Dict[str, Any]:
     if market == "bh":
-        return {"symbol": None, "name": BH_INDEX_NAME, "source": "import"}
+        if len(db.list_index_history(market)) >= 2:
+            return {"symbol": None, "name": BH_INDEX_NAME, "source": "import"}
+        return {"symbol": None, "name": BH_ESTIMATE_NAME, "source": "estimate"}
     symbol = db.get_setting("benchmark:us", "^GSPC") or "^GSPC"
     return {"symbol": symbol, "name": US_BENCHMARKS.get(symbol, symbol), "source": "feed"}
 
@@ -266,6 +275,25 @@ def _imported_index(market: str) -> Optional[pd.Series]:
     if len(pts) < 2:
         return None
     return pd.Series([float(p["close"]) for p in pts], index=pd.to_datetime([p["day"] for p in pts])).sort_index()
+
+
+def _bh_market_estimate(histories: Dict[str, pd.DataFrame]) -> tuple:
+    """
+    Stand-in for the Bahrain All Share Index, which has no free data feed: the average daily
+    move of the actively traded Bahrain Bourse stocks, chained into an index starting at 1000.
+    It is equal-weighted (the official index is weighted by company size) and includes dividends,
+    so it follows the market's direction but will not match the official index level.
+    """
+    closes = {t: histories[t + ".BH"]["Close"] for t in BH_MARKET_BASKET if t + ".BH" in histories}
+    if len(closes) < 3:
+        return None, 0
+    moves = pd.DataFrame(closes).sort_index().pct_change(fill_method=None)
+    moves = moves.where(moves.abs() <= BH_MAX_DAILY_MOVE)
+    active = [c for c in moves.columns if ((moves[c] != 0) & moves[c].notna()).mean() >= BH_ACTIVE_SHARE]
+    if len(active) < 5:
+        active = list(moves.columns)
+    level = (1 + moves[active].mean(axis=1, skipna=True).fillna(0)).cumprod() * 1000
+    return level, len(active)
 
 
 # ---------- maths ----------
@@ -547,6 +575,8 @@ def compute(market: str) -> Dict[str, Any]:
         dates += [d - timedelta(days=90) for d in (_parse_day(p.get("date_bought")) for p in positions) if d]
         start = min(dates).strftime("%Y-%m-01")
         extra = [bench_info["symbol"]] if bench_info["symbol"] else []
+        if bench_info["source"] == "estimate":
+            extra = [t + ".BH" for t in BH_MARKET_BASKET if t + ".BH" not in wanted]
         with ThreadPoolExecutor(max_workers=3) as pool:
             f_hist = pool.submit(_history, wanted + extra, start)
             f_weights = pool.submit(_market_sector_weights) if market == "us" else None
@@ -559,7 +589,11 @@ def compute(market: str) -> Dict[str, Any]:
             bh = histories.get(bench_info["symbol"])
             bench_close = bh["Close"] if bh is not None else None
     if market == "bh":
-        bench_close = _imported_index(market)
+        if bench_info["source"] == "import":
+            bench_close = _imported_index(market)
+        elif wanted:
+            bench_close, used = _bh_market_estimate(histories)
+            bench_info["stocks"] = used
     market_returns = _log_returns(bench_close) if bench_close is not None else None
 
     saved = db.get_metrics() if positions else {}

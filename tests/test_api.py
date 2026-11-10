@@ -66,7 +66,38 @@ def test_markets_are_kept_apart(client):
     assert [p["ticker"] for p in us["positions"]] == ["AAPL"] and us["cash"] == 500 and us["allocations"] == {}
     assert [p["ticker"] for p in bh["positions"]] == ["ALBH"] and bh["cash"] == 75.5 and bh["allocations"] == {"Financials": 0.4}
     assert us["config"]["benchmark"]["symbol"] == "^GSPC"
-    assert bh["config"]["benchmark"]["name"] == "Bahrain All Share Index"
+    assert bh["config"]["benchmark"] == {"symbol": None, "name": "Bahrain market estimate", "source": "estimate"}
+
+
+def test_bahrain_uses_the_official_index_once_it_is_imported(client):
+    points = [{"day": "2024-01-02", "close": 1950.0}, {"day": "2024-01-03", "close": 1955.5}]
+    client.post("/api/index-history", json={"market": "bh", "points": points})
+    bench = client.get("/api/portfolio?market=bh").json()["config"]["benchmark"]
+    assert bench["name"] == "Bahrain All Share Index" and bench["source"] == "import"
+
+
+def test_bahrain_market_estimate_averages_the_active_stocks():
+    import numpy as np
+    import pandas as pd
+    from backend import analytics
+    days = pd.bdate_range("2024-01-01", periods=60)
+    rng = np.random.default_rng(1)
+    histories = {}
+    for i, t in enumerate(analytics.BH_MARKET_BASKET[:8]):
+        if i < 6:      # actively traded: up 1% every day
+            close = pd.Series(1.0 * 1.01 ** np.arange(60), index=days)
+        else:          # never trades: flat, must be left out of the average
+            close = pd.Series(1.0, index=days)
+        histories[t + ".BH"] = pd.DataFrame({"Close": close})
+    level, used = analytics._bh_market_estimate(histories)
+    assert used == 6
+    assert abs(level.iloc[-1] / level.iloc[0] - 1.01 ** 59) < 1e-6
+    # A wild one-day jump is treated as a data error and ignored.
+    bad = histories[analytics.BH_MARKET_BASKET[0] + ".BH"].copy()
+    bad.iloc[30:, 0] *= 5
+    histories[analytics.BH_MARKET_BASKET[0] + ".BH"] = bad
+    level2, _ = analytics._bh_market_estimate(histories)
+    assert abs(level2.iloc[-1] / level.iloc[-1] - 1) < 0.01
 
 
 def test_remove_only_hides_and_restore_brings_back(client, tmp_path):

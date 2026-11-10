@@ -193,13 +193,14 @@ function chartDefs(d, mode, opts = {}) {
   /* 1. Performance against the market */
   const p = d.performance;
   const bName = d.benchmark.name;
-  let perfNote = `Return on the money you invested, next to the same money put into the ${bName} on the same dates`;
+  const estimate = d.benchmark.source === "estimate";
+  let perfNote = estimate
+    ? `Return on the money you invested, next to the same money spread across the Bahrain market on the same dates. The market line is an estimate: the average move of ${d.benchmark.stocks || "the"} actively traded Bahrain Bourse stocks, used because the official Bahrain All Share Index has no free data feed`
+    : `Return on the money you invested, next to the same money put into the ${bName} on the same dates`;
   let perfEmpty = null;
   if (!p) perfEmpty = has ? "Performance appears once each position has its purchase date and price history." : none;
-  else if (!p.benchmark) perfNote = d.market === "bh"
-    ? "Return on the money you invested. Import Bahrain All Share Index data to add the market line"
-    : `Return on the money you invested. Market data for ${bName} isn't available right now`;
-  else if (p.compare_from && p.compare_from > p.starts) perfNote += `. Index data starts ${p.compare_from}, so the market line begins there`;
+  else if (!p.benchmark) perfNote = `Return on the money you invested. Market data for the ${bName} isn't available right now`;
+  else if (p.compare_from && (new Date(p.compare_from) - new Date(p.starts)) / 864e5 > 7) perfNote += `. Market data starts ${p.compare_from}, so the market line begins there`;
   const perfSets = p ? [{ label: "Your portfolio", data: p.portfolio.map((v) => (v == null ? null : v * 100)), borderColor: t.series[0], backgroundColor: t.series[0] }] : [];
   if (p && p.benchmark) perfSets.push({ label: bName, data: p.benchmark.map((v) => (v == null ? null : v * 100)), borderColor: t.series[1], backgroundColor: t.series[1] });
   defs.push({ id: "performance", title: "Your performance vs the market", note: perfNote, height: 340, wide: true, perf: true, empty: perfEmpty,
@@ -303,8 +304,8 @@ function perfTools() {
   const cfg = state.config;
   if (!cfg) return "";
   if (state.market === "bh") {
-    const range = cfg.index_points ? `Index data: ${cfg.index_from} to ${cfg.index_to}` : "No index data yet";
-    return `<div class="chart-tools"><span class="muted">${esc(range)}</span><button class="btn small" type="button" data-action="index">${cfg.index_points ? "Update index data" : "Import index data"}</button></div>`;
+    const range = cfg.index_points >= 2 ? `Official index: ${cfg.index_from} to ${cfg.index_to}` : "Market line: estimate";
+    return `<div class="chart-tools"><span class="muted">${esc(range)}</span><button class="btn small" type="button" data-action="index">${cfg.index_points >= 2 ? "Update index data" : "Use the official index"}</button></div>`;
   }
   const options = cfg.benchmark_options || [];
   const current = cfg.benchmark.symbol;
@@ -372,7 +373,7 @@ function renderKpis(d) {
     ["Invested", v(money(t.invested)), `${t.positions} position${t.positions === 1 ? "" : "s"}`],
     ['Cash <button class="link" type="button" data-action="cash">Edit</button>', money(t.cash), "Uninvested balance"],
     ["Unrealised profit / loss", v(`<span class="${signClass(t.pnl)}">${isNum(t.pnl) ? (t.pnl > 0 ? "+" : "") + money(t.pnl) : "—"}</span>`), isNum(t.pnl_pct) ? `${signedPct(t.pnl_pct)} on ${money(t.cost)} paid` : "Against purchase cost"],
-    ["Versus the market", v(`<span class="${signClass(diff)}">${diffText}</span>`), isNum(diff) ? `${d.benchmark.name}: ${signedPct(p.benchmark_return)}` : d.market === "bh" && !(state.config && state.config.index_points) ? "Import index data to compare" : `Compared with ${d.benchmark.name}`],
+    ["Versus the market", v(`<span class="${signClass(diff)}">${diffText}</span>`), isNum(diff) ? `${d.benchmark.name}: ${signedPct(p.benchmark_return)}` : `Compared with ${d.benchmark.name}`],
     ["Portfolio beta", v(num(t.beta, 2)), `Weighted, against ${d.benchmark.name}`],
     ["Expected return", v(pct(t.expected_return)), "CAPM, yearly"],
     ["Value at risk", v(money(t.var)), "One day, 95%, sum of positions"],
@@ -727,7 +728,7 @@ function openIndex() {
   $("#indexForm").day.max = new Date().toISOString().slice(0, 10);
   $("#indexStatus").textContent = cfg.index_points
     ? `${cfg.index_points} days saved, from ${cfg.index_from} to ${cfg.index_to}. Importing again adds new days and updates existing ones; nothing is removed.`
-    : "There is no automatic feed for this index, so its daily closing values are kept in your database. Import them once, then add new days whenever you like.";
+    : "The market line currently shown is an estimate built from Bahrain Bourse stock prices, because the official index has no free data feed. If you import the official daily closing values here, the chart switches to them. This step is not required.";
   $("#indexDialog").showModal();
 }
 $("#indexForm").addEventListener("submit", async (e) => {
